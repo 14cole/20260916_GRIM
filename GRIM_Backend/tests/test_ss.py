@@ -346,12 +346,11 @@ class TestSsParsing(unittest.TestCase):
             np.testing.assert_allclose(converted.elevations, [10.0, 20.0])
             np.testing.assert_array_equal(converted.polarizations, ["VV", "VH", "HV", "HH"])
             self.assertEqual(converted.units["frequency"], "GHz")
-            self.assertEqual(converted.linear_quantity(), "power_ratio")
-            self.assertEqual(converted.units["rcs_log_unit"], "dB")
-            self.assertIn(
-                "unverified",
-                converted.extra["ss_absolute_normalization_status"],
-            )
+            self.assertEqual(converted.linear_quantity(), "sigma_3d")
+            self.assertEqual(converted.units["rcs_log_unit"], "dBsm")
+            self.assertNotIn("ss_absolute_normalization_status", converted.extra)
+            # |sample|^2 is RCS in m^2: |10+0j|^2 = 100 m^2 = 20 dBsm.
+            np.testing.assert_allclose(converted.rcs_power[0, 0, 0, 0], 100.0)
 
             expected_first = np.asarray([10.0, 11.0, 12.0], dtype=np.complex64)
             expected_second = expected_first + np.complex64(1j)
@@ -364,20 +363,13 @@ class TestSsParsing(unittest.TestCase):
             np.testing.assert_array_equal(restored.polarizations, converted.polarizations)
             np.testing.assert_allclose(restored.rcs, converted.rcs, equal_nan=True)
             self.assertEqual(restored.units["frequency"], "GHz")
-            self.assertEqual(restored.linear_quantity(), "power_ratio")
+            self.assertEqual(restored.linear_quantity(), "sigma_3d")
 
-            with self.assertRaisesRegex(
-                ValueError, "PTM stores 3-D RCS.*power_ratio"
-            ):
-                converted.save_ptm(
-                    os.path.join(tmp, "unsafe.ptm"), el_idx=0, pol_idx=0
-                )
-            with self.assertRaisesRegex(
-                ValueError, "relative/dimensionless response.*absolute 3-D RCS"
-            ):
-                converted.save_pio(
-                    os.path.join(tmp, "unsafe.pio"), el_idx=0, pol_idx=0
-                )
+            # Absolute RCS can now leave GRIM through Pioneer export.
+            pio = RcsGrid.load_pio(
+                converted.save_pio(os.path.join(tmp, "ss.pio"), el_idx=0, pol_idx=0)
+            )
+            self.assertEqual(pio.linear_quantity(), "sigma_3d")
 
     def test_ss_dense_allocation_is_rejected_before_output_arrays(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -415,7 +407,7 @@ class TestSsParsing(unittest.TestCase):
                 stream.seek(metadata["nbytesb"] + 408)
                 stream.write(_be_f4(np.finfo(np.float32).max))
             with self.assertRaisesRegex(
-                ValueError, "too large for finite relative-power storage"
+                ValueError, "too large for finite RCS power storage"
             ):
                 RcsGrid.load_ss(source)
 

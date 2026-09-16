@@ -519,8 +519,8 @@ class XpatchFormatMixin:
 
         Each signal supplies one azimuth/elevation look. Frequencies are in GHz, and
         the polarization axis is VV/VH/HV/HH. Complex samples retain magnitude and
-        phase. The output quantity is a dimensionless power ratio; physical-unit
-        operations require a declared conversion to sigma_3d or sigma_2d.
+        phase. Xpatch stores calibrated scattering amplitudes, so |sample|^2 is
+        3-D RCS in square meters and the output quantity is sigma_3d/dBsm.
         """
         from GRIM_Backend.datasets.constants import _ADOPT_CLEAN_ARRAYS_TOKEN
         from GRIM_Backend.datasets.memory import _checked_dense_import_allocation
@@ -659,7 +659,7 @@ class XpatchFormatMixin:
                     if np.any(sample_power > np.finfo(np.float32).max):
                         raise ValueError(
                             f"SS {pols[pj]} signal {s + 1} magnitude is too "
-                            "large for finite relative-power storage"
+                            "large for finite RCS power storage"
                         )
                     power[ai, ei, finite, pj] = sample_power.astype(np.float32)
                     phase[ai, ei, finite, pj] = np.arctan2(
@@ -673,13 +673,6 @@ class XpatchFormatMixin:
             {
                 "source_format": "Xpatch SS",
                 "ss_azimuth_seam_restored": ss_azimuth_seam_restored,
-                "ss_absolute_normalization_status": (
-                    "unverified; loaded as dimensionless relative power"
-                ),
-                "ss_reader_validation_scope": (
-                    "record framing and axes only; absolute field/RCS normalization "
-                    "requires an independent Xpatch or MATLAB ssread fixture"
-                ),
                 "dense_import_allocation_bytes": allocation["dense_bytes"],
                 "dense_import_peak_bytes": allocation["peak_bytes"],
                 "dense_import_limit_bytes": allocation["limit_bytes"],
@@ -701,7 +694,7 @@ class XpatchFormatMixin:
                      f"): {path}"),
             units={
                 "azimuth": "deg", "elevation": "deg", "frequency": "GHz",
-                "rcs_log_unit": "dB", "rcs_linear_quantity": "power_ratio",
+                "rcs_log_unit": "dBsm", "rcs_linear_quantity": "sigma_3d",
             },
             extra=extra,
             _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,

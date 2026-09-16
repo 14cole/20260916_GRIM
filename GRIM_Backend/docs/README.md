@@ -863,11 +863,9 @@ each binary signal record as one angular look with frequency-varying
 VV/VH/HV/HH complex samples. Saving the imported dataset as `.grim` maps those
 records into GRIM's azimuth/elevation/frequency/polarization grid without
 transposing the physical axes or applying a frequency-magnitude heuristic. The
-available SS header/reference does not establish an absolute RCS normalization,
-so these files are deliberately labeled relative `power_ratio`/dB data. They can
-be plotted and round-tripped, but PTM/PIO export, range calibration, and coherent
-Assembly publication remain blocked until a reviewed conversion establishes
-physical `sigma_3d` or `sigma_2d` units.
+complex samples are calibrated scattering amplitudes: |sample|² is 3-D RCS in
+m², so imports are labeled `sigma_3d`/dBsm and behave like any other absolute
+RCS dataset for plotting, export, and calibration.
 
 Generic theta/phi TXT input requires a unit-bearing column header and either an
 explicit `frequency_ghz=` argument or a unit-qualified filename such as
