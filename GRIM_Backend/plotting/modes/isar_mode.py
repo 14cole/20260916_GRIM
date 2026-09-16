@@ -1278,40 +1278,6 @@ def _isar_preflight_error(
             continue
         stable_motion_declared = True
 
-    def canonical_angular(value) -> str:
-        text = str(value or "").strip().lower().replace("-", "_")
-        return {
-            "": "conic",
-            "az_el": "conic",
-            "azimuth_elevation": "conic",
-            "spherical": "conic",
-            "gc": "great_circle",
-            "greatcircle": "great_circle",
-        }.get(text, text)
-
-    angular_declarations = {
-        canonical_angular(container.get("angular_coordinate_system"))
-        for container in (units, extra)
-        if str(container.get("angular_coordinate_system", "") or "").strip()
-    }
-    if len(angular_declarations) > 1:
-        return "units and extra contain contradictory angular coordinate systems"
-    angular_getter = getattr(dataset, "angular_coordinate_system", None)
-    angular_system = next(iter(angular_declarations), None) or (
-        canonical_angular(angular_getter()) if callable(angular_getter) else "conic"
-    )
-    if angular_system != "conic":
-        if angular_system == "great_circle":
-            return (
-                "great-circle aspect/pitch is not an azimuth/elevation ISAR "
-                "aperture. Convert the dataset to GRIM conic coordinates first; "
-                "non-equatorial PTM cuts require a physically defined conversion"
-            )
-        return (
-            f"angular coordinate system {angular_system or '<unspecified>'!r} is "
-            "unsupported; convert the dataset to GRIM conic azimuth/elevation first"
-        )
-
     elevation_declarations = {
         str(value or "").strip().lower()
         for value in (
@@ -1419,20 +1385,6 @@ def _isar_metadata_token(dataset, elevation_index: int, polarization_index: int)
 
     units = getattr(dataset, "units", None) or {}
     extra = getattr(dataset, "extra", None) or {}
-    angular_getter = getattr(dataset, "angular_coordinate_system", None)
-    angular_system = (
-        angular_getter() if callable(angular_getter)
-        else units.get("angular_coordinate_system", "conic")
-    )
-    gc_getter = getattr(dataset, "great_circle_coordinate_convention", None)
-    gc_convention = gc_getter() if callable(gc_getter) else units.get(
-        "great_circle_coordinate_convention", ""
-    )
-    orientation_getter = getattr(dataset, "angular_frame_orientation_deg", None)
-    orientation = orientation_getter() if callable(orientation_getter) else (
-        units.get("angular_roll_deg", extra.get("ptm_roll", 0.0)),
-        units.get("angular_tilt_deg", extra.get("ptm_tilt", 0.0)),
-    )
     scalar_fields = tuple(
         _declared_scalar_metadata(dataset, key)
         for key in (
@@ -1443,9 +1395,6 @@ def _isar_metadata_token(dataset, elevation_index: int, polarization_index: int)
         )
     )
     return (
-        str(angular_system),
-        str(gc_convention),
-        tuple(float(value) for value in orientation),
         str(units.get("elevation_coordinate_convention", extra.get(
             "sentri_elevation_convention", ""
         ))),

@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from GRIM_Backend.datasets.constants import C0, GRIM_GC_CONVENTION
+from GRIM_Backend.datasets.constants import C0
 from GRIM_Backend.datasets.grid import RcsGrid
 from GRIM_Backend.reports.plot_data import (
     DUAL_COPOLARIZATION,
@@ -529,59 +529,31 @@ class PptPlotDataTests(unittest.TestCase):
                 polarization="VV",
             )
 
-    def test_unmarked_legacy_great_circle_polar_uses_stored_angles_with_note(self):
-        legacy = _grid(
+    def test_great_circle_tagged_data_uses_azimuth_elevation_labels(self):
+        tagged = _grid(
             frequencies=(1.0,),
             coordinate_system="great_circle",
-            gc_convention=None,
-        )
-        availability = get_plot_availability([("Legacy PTM", legacy)])
-        self.assertTrue(availability.polar_available)
-        self.assertIn("stored aspect angles", availability.polar_reason)
-        legacy_polar = build_azimuth_specs(
-            [("Legacy PTM", legacy)],
-            frequencies=[1.0],
-            elevation=0.0,
-            polarization="VV",
-            kind="azimuth_polar",
-        )[0]
-        self.assertEqual(legacy_polar.kind, "azimuth_polar")
-        # Rectangular display does not assert an unknown compass orientation.
-        self.assertEqual(
-            build_azimuth_specs(
-                [("Legacy PTM", legacy)],
-                frequencies=[1.0],
-                elevation=0.0,
-                polarization="VV",
-                kind="azimuth_rect",
-            )[0].kind,
-            "azimuth_rect",
-        )
-
-        marked = _grid(
-            frequencies=(1.0,),
-            coordinate_system="great_circle",
-            gc_convention=GRIM_GC_CONVENTION,
+            gc_convention="legacy_ptm_unspecified",
         )
         polar = build_azimuth_specs(
-            [("GRIM GC", marked)],
+            [("PTM", tagged)],
             frequencies=[1.0],
             elevation=0.0,
             polarization="VV",
             kind="azimuth_polar",
         )[0]
         self.assertEqual(polar.kind, "azimuth_polar")
-        self.assertEqual(polar.x_label, "Aspect (deg)")
-        self.assertIn("Pitch 0 deg", polar.title)
+        self.assertEqual(polar.x_label, "Azimuth (deg)")
+        self.assertIn("Elevation 0 deg", polar.title)
 
         frequency = build_frequency_spec(
-            [("GRIM GC", marked)],
+            [("PTM", tagged)],
             azimuth=0.0,
             elevation=0.0,
             polarization="VV",
         )
-        self.assertIn("Aspect 0 deg", frequency.title)
-        self.assertIn("Pitch 0 deg", frequency.title)
+        self.assertIn("Azimuth 0 deg", frequency.title)
+        self.assertIn("Elevation 0 deg", frequency.title)
 
 
 if __name__ == "__main__":

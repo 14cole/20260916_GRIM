@@ -25,7 +25,6 @@ _REQUIRED_UNIT_KEYS = (
     "elevation",
     "frequency",
     "rcs_linear_quantity",
-    "angular_coordinate_system",
 )
 
 _REQUIRED_COHERENT_FIELDS = (
@@ -309,11 +308,8 @@ class RepeatAcquisitionStack:
         for sweep in values:
             profile = profiles[sweep.acquisition_id]
             for key in _REQUIRED_UNIT_KEYS:
-                if key == "angular_coordinate_system":
-                    text = sweep.grid._declared_scalar_metadata(key)
-                else:
-                    raw = (sweep.grid.units or {}).get(key)
-                    text = "" if raw is None else str(raw).strip()
+                raw = (sweep.grid.units or {}).get(key)
+                text = "" if raw is None else str(raw).strip()
                 if text:
                     profile["declared_units"][key] = text
                 else:

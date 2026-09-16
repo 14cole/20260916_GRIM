@@ -796,17 +796,9 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
                 else str(datasets[0][1].default_log_unit())
             )
             ordinate = (quantity, display_unit)
-        orientation = tuple(
-            float(value) for value in reference.angular_frame_orientation_deg()
-        )
         return (
             str(mode),
             str(projection),
-            reference.angular_coordinate_system(),
-            reference.great_circle_coordinate_convention()
-            if reference.angular_coordinate_system() == "great_circle"
-            else "",
-            orientation,
             self._plot_axis_unit(reference, {
                 "azimuth_rect": "azimuth",
                 "azimuth_polar": "azimuth",

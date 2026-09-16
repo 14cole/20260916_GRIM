@@ -128,7 +128,7 @@ class GridMetadataMixin:
         return self._declared_scalar_metadata("phase_reference")
 
     def _assert_axis_metadata_compatible(self, other):
-        """Require coordinates to share units and the same angular frame.
+        """Require coordinates to share units.
 
         This is the compatibility contract for operations that only align or
         crop coordinates and keep each dataset's response values separate.
@@ -148,30 +148,6 @@ class GridMetadataMixin:
             right = other._supported_unit(key, aliases, default)
             if left != right:
                 raise ValueError(f"{key} unit mismatch: {left} != {right}")
-        left_angles = self.angular_coordinate_system()
-        right_angles = other.angular_coordinate_system()
-        if left_angles != right_angles:
-            raise ValueError(
-                "angular coordinate system mismatch: "
-                f"{left_angles} != {right_angles}"
-            )
-        if left_angles == "great_circle":
-            left_convention = self.great_circle_coordinate_convention()
-            right_convention = other.great_circle_coordinate_convention()
-            if left_convention != right_convention:
-                raise ValueError(
-                    "great-circle coordinate convention mismatch: "
-                    f"{left_convention} != {right_convention}"
-                )
-            left_orientation = self.angular_frame_orientation_deg()
-            right_orientation = other.angular_frame_orientation_deg()
-            if not np.allclose(
-                left_orientation, right_orientation, rtol=0.0, atol=1.0e-7
-            ):
-                raise ValueError(
-                    "great-circle frame orientation mismatch: "
-                    f"roll/tilt {left_orientation} != {right_orientation} deg"
-                )
 
     def _assert_physical_metadata_compatible(self, other):
         self._assert_axis_metadata_compatible(other)

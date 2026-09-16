@@ -45,12 +45,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from GRIM_Backend.datasets.constants import C0, GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION
+from GRIM_Backend.datasets.constants import C0
 from GRIM_Backend.datasets.grid import RcsGrid
-from GRIM_Backend.datasets.coordinates import (
-    canonical_angular_coordinate_system,
-    wedge_to_conic_geometry_deg,
-)
+from GRIM_Backend.datasets.coordinates import wedge_to_conic_geometry_deg
 from GRIM_Backend.io.loaders import (
     SUPPORTED_EXTENSIONS,
     is_supported_path,
@@ -75,8 +72,6 @@ from GRIM_Backend.datasets.transforms import (
 from GRIM_Backend.ui.dataset_dialogs import (
     AlignDialog,
     AxisUnitsDialog,
-    ConicGCDialog,
-    CoordinateSystemDialog,
     CropDialog,
     DatasetAuditDialog,
     DatasetCompatibilityDialog,
@@ -174,36 +169,6 @@ def _frequency_axis_hz(dataset: "RcsGrid", values=None) -> np.ndarray:
 def _hz_to_frequency_axis(dataset: "RcsGrid", values_hz) -> np.ndarray:
     unit = _canonical_frequency_unit((dataset.units or {}).get("frequency", "GHz"))
     return np.asarray(values_hz, dtype=float) / _FREQUENCY_TO_HZ[unit.lower()]
-
-
-def _assert_same_angular_frame(reference: "RcsGrid", dataset: "RcsGrid") -> None:
-    """Reject transferring angle coordinates between different frames."""
-
-    reference_system = reference.angular_coordinate_system()
-    dataset_system = dataset.angular_coordinate_system()
-    if reference_system != dataset_system:
-        raise ValueError(
-            "angular coordinate system differs from the active reference "
-            f"({dataset_system} != {reference_system})"
-        )
-    if reference_system != "great_circle":
-        return
-    reference_convention = reference.great_circle_coordinate_convention()
-    dataset_convention = dataset.great_circle_coordinate_convention()
-    if reference_convention != dataset_convention:
-        raise ValueError(
-            "great-circle convention differs from the active reference "
-            f"({dataset_convention} != {reference_convention})"
-        )
-    if not np.allclose(
-        reference.angular_frame_orientation_deg(),
-        dataset.angular_frame_orientation_deg(),
-        rtol=0.0,
-        atol=1.0e-7,
-    ):
-        raise ValueError(
-            "great-circle roll/tilt differs from the active reference"
-        )
 
 
 def _derived_grid_peak_bytes(dataset: "RcsGrid", shape) -> int:
@@ -1243,10 +1208,10 @@ class DatasetOpsMixin:
                 "btn_slice", "btn_stats", "btn_percentile", "btn_interpolate",
                 "btn_decimate", "btn_mirror", "btn_wrap", "btn_shift",
                 "btn_round", "btn_offset", "btn_medianize", "btn_duplicate",
-                "btn_audit", "btn_provenance", "btn_set_coordinates",
+                "btn_audit", "btn_provenance",
                 "btn_axis_units", "btn_el_to_az360", "btn_swap_el_az",
                 "btn_sentri_elevation", "btn_extrusion",
-                "btn_conic_gc", "btn_wedge_to_conic",
+                "btn_wedge_to_conic",
             ),
             selected_count >= 1,
         )
@@ -1323,15 +1288,11 @@ class DatasetOpsMixin:
             frequency_unit = _unit("frequency", "GHz")
             elevation_unit = _unit("elevation", "deg")
             azimuth_unit = _unit("azimuth", "deg")
-            if dataset.angular_coordinate_system() == "great_circle":
-                elevation_name, azimuth_name = "Pitch", "Aspect"
-            else:
-                elevation_name, azimuth_name = "Elevation", "Azimuth"
             labels = (
                 "Polarization",
                 f"Frequency ({frequency_unit})",
-                f"{elevation_name} ({elevation_unit})",
-                f"{azimuth_name} ({azimuth_unit})",
+                f"Elevation ({elevation_unit})",
+                f"Azimuth ({azimuth_unit})",
             )
 
         for attribute, text in zip(
@@ -2147,7 +2108,6 @@ class DatasetOpsMixin:
                 f"Operand {operand_index}: {name}",
                 f"Source: {source or 'unsaved / in-memory'}",
                 f"Shape: {tuple(int(value) for value in dataset.rcs_power.shape)!r}",
-                f"Coordinate system: {dataset.angular_coordinate_system()}",
                 "Units:",
                 json.dumps(dict(dataset.units or {}), indent=2, sort_keys=True),
                 "History:",
@@ -2441,16 +2401,6 @@ class DatasetOpsMixin:
         estimated_peak = 0
         for name, dataset in datasets:
             try:
-                transfers_angular_values = (
-                    bool(selected_az_deg or selected_el_deg)
-                    if mode == "selected"
-                    else bool(
-                        range_params.get("azimuth") is not None
-                        or range_params.get("elevation") is not None
-                    )
-                )
-                if transfers_angular_values:
-                    _assert_same_angular_frame(reference, dataset)
                 if mode == "selected":
                     kwargs = {
                         "azimuths": (
@@ -3314,7 +3264,6 @@ class DatasetOpsMixin:
         action_export_pio = export_menu.addAction("Pioneer (.pio)…")
         action_export_ptm = export_menu.addAction("PTM (.ptm)…")
         action_export_csv = export_menu.addAction("CSV…")
-        action_coordinates = menu.addAction("Set Coordinates…")
         action_delete = menu.addAction("Delete")
         menu.addSeparator()
         action_color = menu.addAction("Text Color…")
@@ -3328,8 +3277,6 @@ class DatasetOpsMixin:
             self._export_ptm_selected()
         elif action == action_export_csv:
             self._export_csv_selected()
-        elif action == action_coordinates:
-            self._set_coordinates_selected()
         elif action == action_delete:
             self._delete_selected_datasets()
         elif action == action_color:
@@ -3550,7 +3497,6 @@ class DatasetOpsMixin:
         for name, dataset in datasets:
             try:
                 if axis in {"azimuth", "elevation"}:
-                    _assert_same_angular_frame(reference, dataset)
                     angle_unit = _canonical_angle_unit(
                         (dataset.units or {}).get(axis, "deg")
                     )
@@ -4274,7 +4220,6 @@ class DatasetOpsMixin:
         native_pairs: list[tuple[float, float] | None] = []
         try:
             for _name, dataset in datasets:
-                _assert_same_angular_frame(reference, dataset)
                 if selected_pair_deg is None:
                     native_pairs.append(None)
                     continue
@@ -4546,61 +4491,6 @@ class DatasetOpsMixin:
             start_message=f"Estimating {len(datasets)} dataset(s) as {label}...",
         )
 
-    def _set_coordinates_selected(self) -> None:
-        datasets = self._selected_datasets_ordered(
-            use_selection_order=True,
-            empty_message="Select one or more datasets to set their coordinates.",
-        )
-        if datasets is None:
-            return
-        reference = next(
-            (grid for _name, grid in datasets if grid is self.active_dataset),
-            datasets[0][1],
-        )
-        dialog = CoordinateSystemDialog(reference, parent=self)
-        if dialog.exec() != QDialog.Accepted:
-            return
-        params = dialog.get_params()
-        label = "Az/El" if params["coordinate_system"] == "conic" else "Aspect/Pitch"
-        references = [self._python_reference_for_dataset(grid) for _name, grid in datasets]
-
-        def operation(_index, _name, dataset):
-            return dataset.set_angular_coordinate_system(**params)
-
-        def publish(results, skipped) -> None:
-            recorder = getattr(self, "python_recorder", None)
-            new_rows = []
-            for source_index, name, result in results:
-                output_name = f"{name} [{label}]"
-                new_rows.append(self.table.rowCount())
-                output_id = self._add_dataset_row(result, output_name, "", file_name="")
-                if recorder is not None and references[source_index] is not None:
-                    recorder.record_method(
-                        self._python_output_reference(output_id, output_name),
-                        references[source_index], "set_angular_coordinate_system",
-                        kwargs=params, comment=f"Declare {label} coordinates for {name}",
-                    )
-            if new_rows:
-                selection = self.table.selectionModel()
-                self.table.clearSelection()
-                for row in new_rows:
-                    selection.select(
-                        self.table.model().index(row, 0),
-                        QItemSelectionModel.Select | QItemSelectionModel.Rows,
-                    )
-                selection.setCurrentIndex(
-                    self.table.model().index(new_rows[0], 0), QItemSelectionModel.NoUpdate
-                )
-            message = f"Set Coordinates created and selected {len(results)} {label} dataset(s)."
-            if skipped:
-                message += f" Skipped: {_compact_item_summary(skipped)}"
-            self.status.showMessage(message)
-
-        self._start_dataset_map_job(
-            "Set Coordinates", datasets, operation, publish,
-            start_message=f"Setting coordinates for {len(datasets)} dataset(s)...",
-        )
-
     def _convert_axis_units_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
@@ -4665,99 +4555,6 @@ class DatasetOpsMixin:
             publish,
             start_message=f"Converting axis units for {len(datasets)} dataset(s)...",
         )
-
-    def _convert_conic_gc_selected(self) -> None:
-        datasets = self._selected_datasets_ordered(
-            use_selection_order=True,
-            empty_message="Select one or more datasets to convert.",
-        )
-        if datasets is None:
-            return
-
-        first_grid = datasets[0][1]
-        first_coordinate_system = first_grid.angular_coordinate_system()
-        dlg = ConicGCDialog(
-            source_coordinate_system=first_coordinate_system,
-            source_gc_convention=(
-                first_grid.great_circle_coordinate_convention()
-                if first_coordinate_system == "great_circle" else None
-            ),
-            parent=self,
-        )
-        if dlg.exec() != QDialog.Accepted:
-            return
-        params = dlg.get_params()
-        direction = params["direction"]
-        mode = params["mode"]
-        attest_legacy = bool(params.get("attest_legacy_ptm_convention", False))
-        arrow = "Conic→GC" if direction == "conic_to_gc" else "GC→Conic"
-        source_references = [
-            self._python_reference_for_dataset(dataset)
-            for _name, dataset in datasets
-        ]
-
-        def operation(_index, _name, dataset):
-            if mode != "relabel":
-                raise ValueError(
-                    "general conic/great-circle conversion is unavailable "
-                    "until full polarization-basis rotation is implemented"
-                )
-            return self._conic_gc_relabel(
-                dataset,
-                direction,
-                attest_legacy_ptm_convention=attest_legacy,
-            )
-
-        def publish(results, skipped) -> None:
-            recorder = getattr(self, "python_recorder", None)
-            for source_index, name, payload in results:
-                result, suffix, hist_extra = payload
-                history = f"{arrow} {mode}: {name}{hist_extra}"
-                output_name = f"{name} [{arrow} {suffix}]"
-                output_id = self._add_dataset_row(
-                    result, output_name, history, file_name=""
-                )
-                source_ref = source_references[source_index]
-                if recorder is not None and source_ref is not None:
-                    recorder.record_method(
-                        self._python_output_reference(output_id, output_name),
-                        source_ref,
-                        "convert_equatorial_conic_gc",
-                        args=(direction,),
-                        kwargs={"attest_legacy_ptm_convention": attest_legacy},
-                        comment=f"{arrow} exact zero-plane relabel for {name}",
-                    )
-            message = f"{arrow} ({mode}) created {len(results)} dataset(s)."
-            if skipped:
-                message += f" Skipped: {_compact_item_summary(skipped)}"
-            self.status.showMessage(message)
-
-        self._start_dataset_map_job(
-            "Conic/Great-Circle conversion",
-            datasets,
-            operation,
-            publish,
-            start_message=f"Converting {len(datasets)} dataset(s): {arrow}...",
-        )
-
-    def _conic_gc_relabel(
-        self,
-        dataset: "RcsGrid",
-        direction: str,
-        *,
-        attest_legacy_ptm_convention=False,
-    ):
-        """Qt-facing compatibility wrapper around the tested grid operation."""
-
-        result = dataset.convert_equatorial_conic_gc(
-            direction,
-            attest_legacy_ptm_convention=attest_legacy_ptm_convention,
-        )
-        note = (
-            "; exact zero-plane relabel; no interpolation; "
-            "GRIM_GC_V1 convention"
-        )
-        return result, "equator", note
 
     def _convert_wedge_to_conic_selected(self) -> None:
         datasets = self._selected_datasets_ordered(

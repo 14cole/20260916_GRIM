@@ -61,7 +61,7 @@ def render(self) -> None:
 
     az_values = np.asarray(sorted(self._selected_values(self.list_az)), dtype=float)
     if az_values.size == 0:
-        self.status.showMessage("Select one or more azimuths/aspects to plot.")
+        self.status.showMessage("Select one or more azimuths to plot.")
         return
     freq_values = np.asarray(sorted(self._selected_values(self.list_freq)), dtype=float)
     if freq_values.size == 0:
@@ -69,7 +69,7 @@ def render(self) -> None:
         return
     elev_values = np.asarray(sorted(self._selected_values(self.list_elev)), dtype=float)
     if elev_values.size == 0:
-        self.status.showMessage("Select one or more elevations/pitches to plot.")
+        self.status.showMessage("Select one or more elevations to plot.")
         return
     polarization = self._single_selection_value(self.list_pol, "polarization")
     if polarization is None:
@@ -146,7 +146,7 @@ def render(self) -> None:
     if rendered == 0:
         detail = f" Skipped: {', '.join(skipped)}." if skipped else ""
         self.status.showMessage(
-            "No compatible data for the selected azimuth/aspect, elevation/pitch, "
+            "No compatible data for the selected azimuth, elevation, "
             f"frequency, and polarization values.{detail}"
         )
         return

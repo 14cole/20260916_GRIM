@@ -286,21 +286,6 @@ class TestIsarPhysics(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Convert SENTRi Coordinates"):
             form_isar(grid)
 
-    def test_non_equatorial_great_circle_ptm_is_rejected(self):
-        grid = self._preflight_grid(
-            units={
-                "angular_coordinate_system": "great_circle",
-                "great_circle_coordinate_convention": "grim_gc_v1",
-                "angular_roll_deg": 0.0,
-                "angular_tilt_deg": 0.0,
-                "time_convention": "exp(+jwt)",
-            },
-            extra={"phase_reference": "fixed origin", "source_format": "PTM"},
-            elevation=12.0,
-        )
-        with self.assertRaisesRegex(ValueError, "great-circle aspect/pitch"):
-            form_isar(grid)
-
     def test_incompatible_time_convention_is_rejected(self):
         grid = self._preflight_grid(
             units={"time_convention": "exp(-jwt)"},

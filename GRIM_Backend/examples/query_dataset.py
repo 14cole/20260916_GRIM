@@ -230,7 +230,6 @@ def query_sample(
         "source_path": (
             None if dataset.source_path is None else str(dataset.source_path)
         ),
-        "angular_coordinate_system": dataset.angular_coordinate_system(),
         "match_mode": "nearest" if nearest else "within_tolerance",
         "indices": {
             "azimuth": indices[0],

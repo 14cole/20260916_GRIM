@@ -8,7 +8,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-from GRIM_Backend.datasets.constants import GRIM_GC_CONVENTION
 from GRIM_Backend.datasets.grid import RcsGrid
 from GRIM_Backend.io.loaders import (
     SUPPORTED_EXTENSIONS,
@@ -50,7 +49,7 @@ class DatasetFormatDispatchTest(unittest.TestCase):
             ],
         )
 
-    def test_headless_flat_csv_preserves_angular_coordinate_system(self) -> None:
+    def test_headless_flat_csv_ignores_angular_coordinate_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "great_circle.csv")
             with open(path, "w", newline="", encoding="utf-8") as stream:
@@ -74,18 +73,18 @@ class DatasetFormatDispatchTest(unittest.TestCase):
                 writer.writerow(
                     [
                         0.0, 5.0, 10.0, "GHz", "VV", "dBsm",
-                        "great_circle", GRIM_GC_CONVENTION,
+                        "great_circle", "grim_gc_v1",
                         12.5, -1.0, 1.0, 0.0,
                     ]
                 )
 
             grid = load_flat_csv(path)
 
-        self.assertEqual(grid.angular_coordinate_system(), "great_circle")
-        self.assertEqual(
-            grid.great_circle_coordinate_convention(), GRIM_GC_CONVENTION
-        )
-        self.assertEqual(grid.angular_frame_orientation_deg(), (12.5, -1.0))
+        self.assertEqual(grid.units["angular_coordinate_system"], "conic")
+        self.assertNotIn("great_circle_coordinate_convention", grid.units)
+        self.assertNotIn("angular_roll_deg", grid.units)
+        self.assertNotIn("angular_tilt_deg", grid.units)
+        self.assertEqual(grid.elevations.tolist(), [5.0])
 
     def test_headless_flat_csv_rejects_negative_and_conflicting_duplicates(self) -> None:
         header = [

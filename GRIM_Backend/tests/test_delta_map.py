@@ -107,9 +107,9 @@ class DeltaMapTests(unittest.TestCase):
             delta.prepare([("A", a), ("B", b)], **dict(kwargs, polarization="HV"))
         with self.assertRaisesRegex(ValueError, "physical quantities"):
             delta.prepare([("A", a), ("B", grid(log_unit="dBke"))], **kwargs)
+        # Angular coordinate-system tags are not compared.
         b.units["angular_coordinate_system"] = "great_circle"
-        with self.assertRaisesRegex(ValueError, "coordinate systems"):
-            delta.prepare([("A", a), ("B", b)], **kwargs)
+        delta.prepare([("A", a), ("B", b)], **kwargs)
 
     def test_missing_fixed_coordinate_and_ambiguous_matches_rejected(self):
         a, b = grid(), grid()

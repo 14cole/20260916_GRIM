@@ -382,30 +382,11 @@ def _write_flat_csv_direct(
             .format(scale, required_quantity[scale], quantity)
         )
 
-    angular_coordinate_system = (
-        str(grid.angular_coordinate_system()).strip()
-        if hasattr(grid, "angular_coordinate_system")
-        else str(units.get("angular_coordinate_system", "conic")).strip()
-    )
-    if not angular_coordinate_system:
-        angular_coordinate_system = "conic"
-    gc_convention = (
-        str(grid.great_circle_coordinate_convention()).strip()
-        if angular_coordinate_system == "great_circle"
-        and hasattr(grid, "great_circle_coordinate_convention")
-        else ""
-    )
-    if hasattr(grid, "angular_frame_orientation_deg"):
-        angular_roll_deg, angular_tilt_deg = grid.angular_frame_orientation_deg()
-    else:
-        angular_roll_deg = units.get("angular_roll_deg", 0.0)
-        angular_tilt_deg = units.get("angular_tilt_deg", 0.0)
-    for label, value in (
-        ("angular_roll_deg", angular_roll_deg),
-        ("angular_tilt_deg", angular_tilt_deg),
-    ):
-        if not np.isfinite(float(value)):
-            raise ValueError("{} must be finite".format(label))
+    # The v1 schema keeps its angular frame columns, but GRIM angles are always
+    # plain azimuth/elevation so they are written with fixed values.
+    angular_coordinate_system = "conic"
+    gc_convention = ""
+    angular_roll_deg = angular_tilt_deg = 0.0
     polarization_basis = _declared_grid_metadata(grid, "polarization_basis")
     time_convention = _declared_grid_metadata(grid, "time_convention")
     phase_reference = _declared_grid_metadata(grid, "phase_reference")
@@ -627,7 +608,11 @@ def _power_candidates(record, mode, quantity, frequency_unit, c0):
 
 
 def load_flat_csv(path, grid_class, canonical_angular_coordinate_system, c0=299792458.0):
-    """Load supported flat RCS tables into *grid_class*."""
+    """Load supported flat RCS tables into *grid_class*.
+
+    ``canonical_angular_coordinate_system`` is accepted for caller
+    compatibility; angular frame columns are no longer interpreted.
+    """
 
     with open(path, "r", newline="", encoding="utf-8-sig") as stream:
         sample = stream.read(4096)
@@ -693,10 +678,6 @@ def load_flat_csv(path, grid_class, canonical_angular_coordinate_system, c0=2997
             "frequency_unit": set(),
             "rcs_linear_quantity": set(),
             "rcs_log_unit": set(),
-            "angular_coordinate_system": set(),
-            "great_circle_coordinate_convention": set(),
-            "angular_roll_deg": set(),
-            "angular_tilt_deg": set(),
             "polarization_basis": set(),
             "time_convention": set(),
             "phase_reference": set(),
@@ -739,7 +720,6 @@ def load_flat_csv(path, grid_class, canonical_angular_coordinate_system, c0=2997
                 for name in (
                     "azimuth_unit", "elevation_unit", "frequency_unit",
                     "rcs_linear_quantity", "rcs_log_unit",
-                    "angular_coordinate_system",
                 ):
                     if not cell(row, name):
                         raise ValueError("line {}: {} is blank".format(line_no, name))
@@ -841,32 +821,8 @@ def load_flat_csv(path, grid_class, canonical_angular_coordinate_system, c0=2997
                 .format(column, quantity)
             )
 
-    angular_text = _one_value(
-        metadata_sets["angular_coordinate_system"],
-        "angular coordinate systems", default="conic", required=mode == "v1",
-    )
-    angular_coordinate_system = canonical_angular_coordinate_system(angular_text)
-    gc_convention = _one_value(
-        metadata_sets["great_circle_coordinate_convention"],
-        "great-circle coordinate conventions", default="",
-    )
-    if angular_coordinate_system == "great_circle" and not str(gc_convention or "").strip():
-        gc_convention = "legacy_ptm_unspecified"
-
-    def numeric_metadata(name, default):
-        text = _one_value(metadata_sets[name], name, default=str(default))
-        if text is None or str(text).strip() == "":
-            return float(default)
-        try:
-            value = float(text)
-        except ValueError as exc:
-            raise ValueError("invalid {} ({})".format(name, exc)) from exc
-        if not np.isfinite(value):
-            raise ValueError("{} must be finite".format(name))
-        return value
-
-    angular_roll_deg = numeric_metadata("angular_roll_deg", 0.0)
-    angular_tilt_deg = numeric_metadata("angular_tilt_deg", 0.0)
+    # Angular frame columns (coordinate system, great-circle convention,
+    # roll/tilt) are ignored: every dataset loads as azimuth/elevation.
     polarization_basis = _one_value(
         metadata_sets["polarization_basis"], "polarization bases", default=""
     )
@@ -1007,12 +963,8 @@ def load_flat_csv(path, grid_class, canonical_angular_coordinate_system, c0=2997
         "frequency": frequency_unit,
         "rcs_log_unit": log_unit,
         "rcs_linear_quantity": quantity,
-        "angular_coordinate_system": angular_coordinate_system,
-        "angular_roll_deg": angular_roll_deg,
-        "angular_tilt_deg": angular_tilt_deg,
+        "angular_coordinate_system": "conic",
     }
-    if angular_coordinate_system == "great_circle":
-        units["great_circle_coordinate_convention"] = str(gc_convention)
     if str(polarization_basis or "").strip():
         units["polarization_basis"] = str(polarization_basis).strip()
     if str(time_convention or "").strip():

@@ -39,7 +39,6 @@ import GRIM_Backend.integrations.ghost as ghost_integration
 from GRIM_Backend.ui.dataset_actions import (
     DATASET_DIRTY_ROLE,
     DATASET_ID_ROLE,
-    ConicGCDialog,
     RangeCalibrationDialog,
     SupportReferenceDifferenceDialog,
     WedgeConicDialog,
@@ -51,7 +50,6 @@ from GRIM_Backend.assembly.tree import (
     _attach,
     _branch_drop_would_create_cycle,
 )
-from GRIM_Backend.datasets.constants import GRIM_GC_CONVENTION
 from GRIM_Backend.datasets.grid import RcsGrid
 
 
@@ -971,63 +969,17 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertNotIn("assumptions_attested", recorded)
         self.assertIn("target_label='Vehicle on support'", recorded)
 
-    def test_set_coordinates_selects_matching_copies_and_updates_gui_labels(self) -> None:
-        from GRIM_Backend.plotting.modes.common import validate_plot_datasets
+    def test_coordinate_system_actions_are_removed(self) -> None:
+        import inspect
 
-        source = _grid()
-        source.elevations[:] = 7.5
-        ptm = source.set_angular_coordinate_system("great_circle")
-        self.window._add_dataset_row(source, "PIO", "", "same.pio")
-        self.window._add_dataset_row(ptm, "PTM", "", "same.ptm")
-        self.window.table.selectAll()
-        with mock.patch.object(grim_cut_dataset_mixin, "CoordinateSystemDialog") as dialog:
-            dialog.return_value.exec.return_value = QDialog.Accepted
-            dialog.return_value.get_params.return_value = {"coordinate_system": "conic"}
-            self.window.btn_set_coordinates.click()
-        self._wait_for_background()
-
-        self.assertEqual(self.window.table.rowCount(), 4)
-        self.assertEqual(
-            sorted(index.row() for index in self.window.table.selectionModel().selectedRows()),
-            [2, 3],
+        for name in ("btn_set_coordinates", "btn_conic_gc"):
+            self.assertFalse(hasattr(self.window, name), name)
+        for name in ("_set_coordinates_selected", "_convert_conic_gc_selected"):
+            self.assertFalse(hasattr(self.window, name), name)
+        self.assertNotIn(
+            "Set Coordinates",
+            inspect.getsource(type(self.window)._on_dataset_context_menu),
         )
-        self.assertEqual(self.window.lbl_az.text(), "Azimuth (deg)")
-        self.assertEqual(self.window.lbl_elev.text(), "Elevation (deg)")
-        validate_plot_datasets(self.window._selected_datasets(), phase=False, linear=False)
-        self.assertIn(
-            "set_angular_coordinate_system(coordinate_system='conic')",
-            self.window.python_recorder.script,
-        )
-        for row in (2, 3):
-            result = self.window.table.item(row, 0).data(Qt.UserRole)
-            np.testing.assert_array_equal(result.elevations, source.elevations)
-            np.testing.assert_array_equal(result.rcs_power, source.rcs_power)
-        self.assertEqual(
-            self.window.table.item(1, 0).data(Qt.UserRole).angular_coordinate_system(),
-            "great_circle",
-        )
-
-    def test_set_coordinates_cancel_keeps_original_rows(self) -> None:
-        self.window._add_dataset_row(_grid(), "PIO", "", "same.pio")
-        self.window.table.selectRow(0)
-        with mock.patch.object(grim_cut_dataset_mixin, "CoordinateSystemDialog") as dialog:
-            dialog.return_value.exec.return_value = QDialog.Rejected
-            self.window.btn_set_coordinates.click()
-        self.assertEqual(self.window.table.rowCount(), 1)
-        self.assertFalse(self.window._background_job_active())
-
-    def test_coordinate_dialog_exposes_both_interpretations(self) -> None:
-        source = _grid().set_angular_coordinate_system(
-            "great_circle", roll_deg=1.25, tilt_deg=-2.5
-        )
-        dialog = grim_cut_dataset_mixin.CoordinateSystemDialog(source)
-        self.addCleanup(dialog.deleteLater)
-        self.assertEqual(dialog.get_params()["coordinate_system"], "great_circle")
-        self.assertEqual(dialog.get_params()["roll_deg"], 1.25)
-        self.assertEqual(dialog.get_params()["tilt_deg"], -2.5)
-        dialog._system.setCurrentIndex(dialog._system.findData("conic"))
-        self.assertEqual(dialog.get_params(), {"coordinate_system": "conic"})
-        self.assertTrue(dialog._gc_options.isHidden())
 
     def test_sentri_elevation_button_is_explicit_and_converts_selected_data(self) -> None:
         self.assertEqual(self.window.btn_sentri_elevation.text(), "SENTRi El→GRIM")
@@ -1306,8 +1258,8 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.app.processEvents()
 
         self.assertEqual(self.window.lbl_freq.text(), "Frequency (Hz)")
-        self.assertEqual(self.window.lbl_elev.text(), "Pitch (rad)")
-        self.assertEqual(self.window.lbl_az.text(), "Aspect (rad)")
+        self.assertEqual(self.window.lbl_elev.text(), "Elevation (rad)")
+        self.assertEqual(self.window.lbl_az.text(), "Azimuth (rad)")
         for widget in (
             self.window.list_pol,
             self.window.list_freq,
@@ -1787,7 +1739,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
             precision="double",
         )
 
-    def test_pioneer_export_reports_great_circle_incompatibility(self) -> None:
+    def test_pioneer_export_ignores_coordinate_system_tags(self) -> None:
         dataset = _grid(1.0)
         dataset.units["angular_coordinate_system"] = "great_circle"
         with tempfile.TemporaryDirectory() as tmp:
@@ -1811,8 +1763,9 @@ class UnifiedGuiShellTest(unittest.TestCase):
             ):
                 self.window._export_pio_selected()
                 self._wait_for_background()
+                self.assertTrue(os.path.exists(destination))
 
-        self.assertIn(
+        self.assertNotIn(
             "cannot represent", self.window.status.currentMessage()
         )
 
@@ -1929,122 +1882,11 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self._wait_for_background()
 
         duplicate = self.window.table.item(start_row, 0).data(Qt.UserRole)
-        self.assertEqual(duplicate.angular_coordinate_system(), "great_circle")
         self.assertEqual(
-            duplicate.angular_frame_orientation_deg(), (12.5, -1.0)
+            (duplicate.extra["ptm_roll"], duplicate.extra["ptm_tilt"]), (12.5, -1.0)
         )
         np.testing.assert_array_equal(duplicate.extra["test_array"], [1.0, 2.0])
         self.assertIsNot(duplicate.extra["test_array"], dataset.extra["test_array"])
-
-    def test_gc_to_conic_allows_only_exact_equatorial_copol_relabel(self) -> None:
-        azimuths = np.asarray([179.0, -179.0, 0.0])
-        field = np.arange(12, dtype=float).reshape(3, 1, 2, 2) + 1j
-        dataset = RcsGrid(
-            azimuths,
-            [0.0],
-            [9.0, 10.0],
-            ["VV", "HH"],
-            rcs=field,
-            units={
-                "azimuth": "deg",
-                "elevation": "deg",
-                "frequency": "GHz",
-                "rcs_log_unit": "dBsm",
-                "rcs_linear_quantity": "sigma_3d",
-                "angular_coordinate_system": "great_circle",
-                "great_circle_coordinate_convention": GRIM_GC_CONVENTION,
-                "angular_roll_deg": 0.0,
-                "angular_tilt_deg": 0.0,
-            },
-            extra={
-                "angular_coordinate_system": "great_circle",
-                "ptm_cut_type": "GC",
-                "ptm_roll": 0.0,
-                "ptm_tilt": 0.0,
-                "phase_reference": "exp(-jkr)",
-                "ptm_subject": "archive me",
-            },
-        )
-
-        converted, suffix, _ = self.window._conic_gc_relabel(
-            dataset, "gc_to_conic"
-        )
-        self.assertEqual(suffix, "equator")
-        self.assertEqual(converted.angular_coordinate_system(), "conic")
-        np.testing.assert_array_equal(converted.azimuths, [-179.0, 0.0, 179.0])
-        np.testing.assert_array_equal(converted.elevations, [0.0])
-        np.testing.assert_allclose(
-            converted.rcs, field[[1, 2, 0], :, :, :],
-            rtol=1.0e-14, atol=1.0e-14,
-        )
-        self.assertNotIn("angular_roll_deg", converted.units)
-        self.assertNotIn("angular_tilt_deg", converted.units)
-        self.assertNotIn("angular_coordinate_system", converted.extra)
-        self.assertNotIn("ptm_cut_type", converted.extra)
-        self.assertEqual(converted.extra["phase_reference"], "exp(-jkr)")
-        self.assertEqual(converted.extra["ptm_subject"], "archive me")
-
-        dataset.units["angular_roll_deg"] = 1.0
-        with self.assertRaisesRegex(ValueError, "roll=tilt=0"):
-            self.window._conic_gc_relabel(dataset, "gc_to_conic")
-
-        dataset.units["angular_roll_deg"] = 0.0
-        cross_pol = RcsGrid(
-            dataset.azimuths,
-            dataset.elevations,
-            dataset.frequencies,
-            ["VH", "HV"],
-            rcs=field,
-            units=dict(dataset.units),
-        )
-        with self.assertRaisesRegex(ValueError, "VV/HH only"):
-            self.window._conic_gc_relabel(cross_pol, "gc_to_conic")
-
-        conic_source = RcsGrid(
-            [0.0, 90.0, 180.0],
-            [0.0],
-            dataset.frequencies,
-            dataset.polarizations,
-            rcs=field,
-            units={
-                "azimuth": "deg",
-                "elevation": "deg",
-                "frequency": "GHz",
-                "rcs_log_unit": "dBsm",
-                "rcs_linear_quantity": "sigma_3d",
-                "angular_coordinate_system": "conic",
-            },
-        )
-        converted_gc, _, _ = self.window._conic_gc_relabel(
-            conic_source, "conic_to_gc"
-        )
-        self.assertEqual(converted_gc.angular_coordinate_system(), "great_circle")
-        self.assertEqual(
-            converted_gc.great_circle_coordinate_convention(), GRIM_GC_CONVENTION
-        )
-
-    def test_conic_gc_dialog_is_symmetric_without_attestation_gate(self):
-        conic_dialog = ConicGCDialog(source_coordinate_system="conic")
-        self.assertEqual(
-            conic_dialog.get_params()["direction"], "conic_to_gc"
-        )
-        self.assertFalse(conic_dialog._radio_regrid.isEnabled())
-        self.assertFalse(
-            conic_dialog.get_params()["attest_legacy_ptm_convention"]
-        )
-        conic_dialog.deleteLater()
-
-        legacy_dialog = ConicGCDialog(
-            source_coordinate_system="great_circle",
-            source_gc_convention="legacy_ptm_unspecified",
-        )
-        self.assertEqual(
-            legacy_dialog.get_params()["direction"], "gc_to_conic"
-        )
-        self.assertFalse(
-            legacy_dialog.get_params()["attest_legacy_ptm_convention"]
-        )
-        legacy_dialog.deleteLater()
 
     def test_wedge_dialog_records_axis_assumption_and_only_offers_regrid(self):
         dialog = WedgeConicDialog()

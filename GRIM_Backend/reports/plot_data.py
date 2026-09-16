@@ -19,7 +19,6 @@ from typing import Iterable, Literal, Sequence
 
 import numpy as np
 
-from GRIM_Backend.datasets.constants import GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION
 from GRIM_Backend.datasets.grid import RcsGrid
 from GRIM_Backend.reports.report import PlotSeries, PlotSpec
 
@@ -86,12 +85,9 @@ class PlotAvailability:
     elevation_unit: str
     frequency_unit: str
     rcs_unit: str
-    angular_coordinate_system: str
     phase_available: bool
     phase_reference: str
     phase_reason: str
-    polar_available: bool
-    polar_reason: str
 
 
 def _coerce_named_grids(
@@ -387,26 +383,6 @@ def _phase_capability(datasets: tuple[NamedGrid, ...]) -> tuple[bool, str, str]:
     return True, common_reference, ". ".join(notes) + ("." if notes else "")
 
 
-def _polar_capability(datasets: tuple[NamedGrid, ...]) -> tuple[bool, str]:
-    notes = []
-    for dataset in datasets:
-        system = dataset.grid.angular_coordinate_system()
-        if system == "great_circle":
-            convention = dataset.grid.great_circle_coordinate_convention()
-            if convention == LEGACY_PTM_GC_CONVENTION:
-                notes.append(
-                    f"{dataset.name!r} is unmarked legacy great-circle data; polar "
-                    "placement uses its stored aspect angles without inferring a "
-                    "calibrated compass orientation"
-                )
-                continue
-            if convention != GRIM_GC_CONVENTION:
-                return False, f"{dataset.name!r} uses unsupported great-circle convention {convention!r}."
-        elif system != "conic":
-            return False, f"{dataset.name!r} uses unsupported angular coordinate system {system!r}."
-    return True, ". ".join(notes) + ("." if notes else "")
-
-
 def get_plot_availability(
     datasets: Sequence[NamedGrid | tuple[str, RcsGrid]],
     *,
@@ -428,7 +404,6 @@ def get_plot_availability(
             "",
             "Phase capability was not evaluated for this magnitude-only report.",
         )
-    polar_available, polar_reason = _polar_capability(selected)
     return PlotAvailability(
         azimuths=_numeric_intersection([item.grid.azimuths for item in selected], tol),
         elevations=_numeric_intersection([item.grid.elevations for item in selected], tol),
@@ -438,12 +413,9 @@ def get_plot_availability(
         elevation_unit=_angle_unit(reference, "elevation"),
         frequency_unit=_frequency_unit(reference),
         rcs_unit=reference.default_log_unit(),
-        angular_coordinate_system=reference.angular_coordinate_system(),
         phase_available=phase_available,
         phase_reference=phase_reference,
         phase_reason=phase_reason,
-        polar_available=polar_available,
-        polar_reason=polar_reason,
     )
 
 
@@ -526,10 +498,6 @@ def build_azimuth_specs(
     plot_kind = str(kind).strip().lower()
     if plot_kind not in {"azimuth_rect", "azimuth_polar"}:
         raise ValueError("Azimuth plot kind must be 'azimuth_rect' or 'azimuth_polar'.")
-    if plot_kind == "azimuth_polar" and not availability.polar_available:
-        raise ValueError(
-            "Polar azimuth plotting is unavailable: " + availability.polar_reason
-        )
     plot_quantity = _validate_quantity(quantity, availability)
     angle_unit = _display_angle_unit(angle_display_unit)
     frequency_unit = _display_frequency_unit(frequency_display_unit)
@@ -564,12 +532,8 @@ def build_azimuth_specs(
     elevation_display = float(
         _convert_angles([elevation], native_elevation_unit, angle_unit)[0]
     )
-    if availability.angular_coordinate_system == "great_circle":
-        swept_axis_label = "Aspect"
-        fixed_angle_label = "Pitch"
-    else:
-        swept_axis_label = "Azimuth"
-        fixed_angle_label = "Elevation"
+    swept_axis_label = "Azimuth"
+    fixed_angle_label = "Elevation"
     y_label = "Phase (deg)" if plot_quantity == "phase" else f"RCS ({availability.rcs_unit})"
 
     # The swept azimuth axis, fixed-axis indices, and stable sort order do not
@@ -775,12 +739,8 @@ def build_elevation_specs(
     azimuth_display = float(
         _convert_angles([azimuth], native_azimuth_unit, angle_unit)[0]
     )
-    if availability.angular_coordinate_system == "great_circle":
-        swept_axis_label = "Pitch"
-        fixed_angle_label = "Aspect"
-    else:
-        swept_axis_label = "Elevation"
-        fixed_angle_label = "Azimuth"
+    swept_axis_label = "Elevation"
+    fixed_angle_label = "Azimuth"
     y_label = (
         "Phase (deg)"
         if plot_quantity == "phase"
@@ -1125,12 +1085,8 @@ def build_frequency_spec(
     elevation_display = float(
         _convert_angles([elevation], native_elevation_unit, angle_unit)[0]
     )
-    if availability.angular_coordinate_system == "great_circle":
-        primary_angle_label = "Aspect"
-        secondary_angle_label = "Pitch"
-    else:
-        primary_angle_label = "Azimuth"
-        secondary_angle_label = "Elevation"
+    primary_angle_label = "Azimuth"
+    secondary_angle_label = "Elevation"
     series: list[PlotSeries] = []
     for dataset in selected:
         grid = dataset.grid

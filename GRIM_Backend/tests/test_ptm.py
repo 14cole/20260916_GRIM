@@ -5,7 +5,6 @@ import unittest
 
 import numpy as np
 
-from GRIM_Backend.datasets.constants import GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION
 from GRIM_Backend.datasets.grid import RcsGrid
 import GRIM_Backend.io.ptm as ptm_io
 
@@ -74,21 +73,15 @@ class PtmReadTests(unittest.TestCase):
                 rtol=2.0e-6, atol=2.0e-6
             )
             self.assertEqual(grid.linear_quantity(), "sigma_3d")
-            self.assertEqual(grid.angular_coordinate_system(), "great_circle")
-            self.assertEqual(
-                grid.great_circle_coordinate_convention(),
-                LEGACY_PTM_GC_CONVENTION,
-            )
-            self.assertEqual(
-                grid.units["angular_coordinate_system"], "great_circle"
-            )
-            self.assertEqual(grid.extra["angular_coordinate_system"], "great_circle")
-            self.assertEqual(grid.extra["ptm_cut_type"], "GC")
+            # PTM aspect/pitch load as plain azimuth/elevation.
+            self.assertNotIn("angular_coordinate_system", grid.units)
+            self.assertNotIn("angular_coordinate_system", grid.extra)
+            self.assertNotIn("ptm_cut_type", grid.extra)
             self.assertEqual(grid.extra["ptm_corecell"], 11)
             self.assertEqual(grid.extra["ptm_subject"], "fixture subject")
             self.assertTrue(grid.extra["ptm_embedded_num_frequencies"])
             self.assertEqual(
-                grid.angular_frame_orientation_deg(), (1.25, -2.5)
+                (grid.extra["ptm_roll"], grid.extra["ptm_tilt"]), (1.25, -2.5)
             )
 
             conic = RcsGrid(
@@ -105,32 +98,10 @@ class PtmReadTests(unittest.TestCase):
                     "rcs_linear_quantity": "sigma_3d",
                 },
             )
-            with self.assertRaisesRegex(
-                ValueError, "angular coordinate system mismatch"
-            ):
-                grid.coherent_add(conic)
-
-            different_frame = RcsGrid(
-                grid.azimuths,
-                grid.elevations,
-                grid.frequencies,
-                grid.polarizations,
-                rcs=grid.rcs,
-                units={
-                    **grid.units,
-                    "angular_roll_deg": 2.0,
-                },
-            )
-            with self.assertRaisesRegex(
-                ValueError, "great-circle frame orientation mismatch"
-            ):
-                grid.coherent_add(different_frame)
+            # Coordinate systems no longer gate arithmetic with az/el data.
+            grid.coherent_add(conic, metadata_attested=True)
 
             derived = grid.coherent_add(grid, metadata_attested=True)
-            self.assertEqual(derived.angular_coordinate_system(), "great_circle")
-            self.assertEqual(
-                derived.angular_frame_orientation_deg(), (1.25, -2.5)
-            )
             derived_path = derived.save_ptm(os.path.join(tmp, "derived.ptm"))
             derived_header = ptm_io.read_ptm(derived_path).header
             self.assertAlmostEqual(derived_header.roll, 1.25)
@@ -200,16 +171,13 @@ class PtmReadTests(unittest.TestCase):
 
 class PtmWriteTests(unittest.TestCase):
     @staticmethod
-    def _grid(*, pitch=0.0, coordinate_system=None):
+    def _grid(*, pitch=0.0):
         aspects = np.asarray([-179.0, -177.0, 179.0])
         frequencies = np.linspace(8.05, 11.95, 40)
         indices = np.arange(aspects.size * frequencies.size, dtype=float).reshape(
             aspects.size, frequencies.size
         )
         iq = (1.0 + indices / 100.0) * np.exp(1j * (indices / 37.0))
-        extra = {}
-        if coordinate_system:
-            extra["angular_coordinate_system"] = coordinate_system
         grid = RcsGrid(
             aspects,
             [pitch],
@@ -223,7 +191,6 @@ class PtmWriteTests(unittest.TestCase):
                 "rcs_log_unit": "dBsm",
                 "rcs_linear_quantity": "sigma_3d",
             },
-            extra=extra,
         )
         return grid, np.asarray(iq, dtype=np.complex64)
 
@@ -239,12 +206,8 @@ class PtmWriteTests(unittest.TestCase):
             self.assertEqual(struct.unpack_from("<i", raw, 0)[0], 3)
             self.assertEqual(raw[72:74], b"VV")
             self.assertEqual(struct.unpack_from("<i", raw, 220)[0], 40)
-            self.assertIn(
+            self.assertNotIn(
                 "GRIM_GC_V1", ptm_io.read_ptm(path).header.configuration
-            )
-            self.assertEqual(
-                RcsGrid.load_ptm(path).great_circle_coordinate_convention(),
-                GRIM_GC_CONVENTION,
             )
             disk_iq = np.frombuffer(raw, dtype="<c8", count=3 * 40, offset=block_size)
             np.testing.assert_array_equal(
@@ -388,61 +351,28 @@ class PtmWriteTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "documented polarizations"):
                 unsupported_polarity.save_ptm(os.path.join(tmp, "te.ptm"))
 
-    def test_nonzero_pitch_requires_great_circle_metadata(self):
+    def test_any_elevation_and_polarization_exports_without_coordinate_checks(self):
         with tempfile.TemporaryDirectory() as tmp:
-            untagged, _ = self._grid(pitch=7.5)
-            with self.assertRaisesRegex(ValueError, "great-circle"):
-                untagged.save_ptm(os.path.join(tmp, "ambiguous.ptm"))
-
-            tagged, _ = self._grid(pitch=7.5, coordinate_system="great_circle")
-            output = tagged.save_ptm(os.path.join(tmp, "gc.ptm"))
+            nonzero, _ = self._grid(pitch=7.5)
+            output = nonzero.save_ptm(os.path.join(tmp, "nonzero.ptm"))
             self.assertAlmostEqual(ptm_io.read_ptm(output).header.pitch, 7.5)
-            with self.assertRaisesRegex(ValueError, "cannot represent"):
-                tagged.save_pio(os.path.join(tmp, "ambiguous.pio"))
+            nonzero.save_pio(os.path.join(tmp, "nonzero.pio"))
 
-            # GRIM_GC_V1 is intentionally scoped to the tested zero-plane
-            # co-pol subset. A wider GC file may still be written, but it must
-            # not carry a marker that would overclaim conversion semantics.
-            tagged.units["great_circle_coordinate_convention"] = (
-                GRIM_GC_CONVENTION
-            )
-            tagged.extra["ptm_configuration"] = "GRIM_GC_V1;keep provenance"
-            wide_output = tagged.save_ptm(os.path.join(tmp, "wide-gc.ptm"))
-            wide_header = ptm_io.read_ptm(wide_output).header
-            self.assertNotIn("GRIM_GC_V1", wide_header.configuration)
-            self.assertEqual(wide_header.configuration, "keep provenance")
+            # GRIM no longer claims a coordinate convention, so an inherited
+            # GRIM_GC_V1 marker is removed while other provenance is kept.
+            nonzero.extra["ptm_configuration"] = "GRIM_GC_V1;keep provenance"
+            marked = nonzero.save_ptm(os.path.join(tmp, "marked.ptm"))
             self.assertEqual(
-                RcsGrid.load_ptm(wide_output).great_circle_coordinate_convention(),
-                LEGACY_PTM_GC_CONVENTION,
+                ptm_io.read_ptm(marked).header.configuration, "keep provenance"
             )
 
-            contradictory, _ = self._grid(pitch=7.5)
-            contradictory.units["angular_coordinate_system"] = "conic"
-            contradictory.extra["ptm_cut_type"] = "GC"
-            with self.assertRaisesRegex(ValueError, "nonzero-elevation conic"):
-                contradictory.save_ptm(os.path.join(tmp, "stale-tag.ptm"))
-
-            conic_cross, _ = self._grid(pitch=0.0)
-            conic_cross.polarizations = np.asarray(["VH"])
-            with self.assertRaisesRegex(ValueError, "supports VV/HH only"):
-                conic_cross.save_ptm(os.path.join(tmp, "conic-vh.ptm"))
-
-            rotated_conic, _ = self._grid(pitch=0.0)
-            rotated_conic.units["angular_roll_deg"] = 1.0
-            with self.assertRaisesRegex(ValueError, "roll=tilt=0"):
-                rotated_conic.save_ptm(os.path.join(tmp, "rotated-conic.ptm"))
-
-            unknown_coordinates, _ = self._grid(pitch=0.0)
-            unknown_coordinates.units["angular_coordinate_system"] = "turntable"
-            with self.assertRaisesRegex(ValueError, "conic or great_circle"):
-                unknown_coordinates.save_ptm(os.path.join(tmp, "unknown.ptm"))
-
-            gc_cross, _ = self._grid(
-                pitch=5.0, coordinate_system="great_circle"
-            )
-            gc_cross.polarizations = np.asarray(["VH"])
-            gc_cross_path = gc_cross.save_ptm(os.path.join(tmp, "gc-vh.ptm"))
-            self.assertEqual(ptm_io.read_ptm(gc_cross_path).header.polarity, "VH")
+            cross, _ = self._grid(pitch=5.0)
+            cross.polarizations = np.asarray(["VH"])
+            cross.extra["ptm_roll"] = 1.0
+            cross_path = cross.save_ptm(os.path.join(tmp, "vh.ptm"))
+            cross_header = ptm_io.read_ptm(cross_path).header
+            self.assertEqual(cross_header.polarity, "VH")
+            self.assertAlmostEqual(cross_header.roll, 1.0)
 
     def test_multiple_axes_require_explicit_slice_selection(self):
         aspects = [0.0, 1.0]
@@ -455,7 +385,6 @@ class PtmWriteTests(unittest.TestCase):
             ["HH", "VV"],
             rcs=iq,
             units={"frequency": "GHz", "rcs_linear_quantity": "sigma_3d"},
-            extra={"angular_coordinate_system": "great_circle"},
         )
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "el_idx required"):

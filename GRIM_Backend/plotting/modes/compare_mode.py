@@ -437,10 +437,10 @@ def render(self) -> None:
     elevations = self._selected_values(self.list_elev)
     frequencies = self._selected_values(self.list_freq)
     if not azimuths:
-        self.status.showMessage("Compare: select one or more azimuths/aspects.")
+        self.status.showMessage("Compare: select one or more azimuths.")
         return
     if not elevations:
-        self.status.showMessage("Compare: select one or more elevations/pitches.")
+        self.status.showMessage("Compare: select one or more elevations.")
         return
     if not frequencies:
         self.status.showMessage("Compare: select one or more frequencies.")
@@ -452,7 +452,7 @@ def render(self) -> None:
     sweep_axis = _determine_sweep_axis(azimuths, elevations, frequencies)
     if sweep_axis is None:
         self.status.showMessage(
-            "Compare: select 2+ azimuths/aspects, elevations/pitches, or frequencies "
+            "Compare: select 2+ azimuths, elevations, or frequencies "
             "for the sweep."
         )
         return

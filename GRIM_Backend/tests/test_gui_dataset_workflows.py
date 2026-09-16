@@ -334,10 +334,10 @@ class DatasetOperationDialogTest(unittest.TestCase):
         gc_regrid = RegridDialog(great_circle)
         self.addCleanup(gc_crop.deleteLater)
         self.addCleanup(gc_regrid.deleteLater)
-        self.assertEqual(gc_crop._range_controls["azimuth"][0].text(), "Aspect (deg)")
-        self.assertEqual(gc_crop._range_controls["elevation"][0].text(), "Pitch (deg)")
-        self.assertEqual(gc_regrid._axis.itemText(0), "Aspect")
-        self.assertEqual(gc_regrid._axis.itemText(1), "Pitch")
+        self.assertEqual(gc_crop._range_controls["azimuth"][0].text(), "Azimuth (deg)")
+        self.assertEqual(gc_crop._range_controls["elevation"][0].text(), "Elevation (deg)")
+        self.assertEqual(gc_regrid._axis.itemText(0), "Azimuth")
+        self.assertEqual(gc_regrid._axis.itemText(1), "Elevation")
 
 
 class GuiDatasetWorkflowTest(unittest.TestCase):
@@ -869,7 +869,7 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
         np.testing.assert_allclose(radians_ghz.elevations, [0.0])
         np.testing.assert_allclose(radians_ghz.frequencies, [9.0])
 
-    def test_crop_rejects_cross_frame_reference_value_transfer_atomically(self) -> None:
+    def test_crop_transfers_reference_values_regardless_of_coordinate_tags(self) -> None:
         conic = _mixed_unit_grid(radians=False, frequency_hz=False)
         great_circle = _mixed_unit_grid(radians=False, frequency_hz=False)
         great_circle.units.update(
@@ -901,12 +901,10 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
                 "selected_polarizations": False,
             }
             self.window._slice_selected()
+            self._wait_for_background()
 
-        self.assertEqual(self.window.table.rowCount(), 2)
-        self.assertIn(
-            "angular coordinate system differs",
-            self.window.status.currentMessage(),
-        )
+        self.assertEqual(self.window.table.rowCount(), 4)
+        self.assertNotIn("differs", self.window.status.currentMessage())
 
     def test_regrid_all_axes_converts_active_reference_to_native_units(self) -> None:
         self.window._add_dataset_row(

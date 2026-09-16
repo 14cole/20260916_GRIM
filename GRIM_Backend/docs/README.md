@@ -85,6 +85,10 @@ angular_roll_deg,angular_tilt_deg,polarization_basis,time_convention,
 phase_reference,phase_wrap,[magnitude column(s)],[phase_deg]
 ```
 
+The four angular frame columns are kept for schema compatibility only. GRIM
+writes `conic`, a blank convention, and zero roll/tilt, and ignores their
+values when loading.
+
 The selected magnitude columns are `magnitude_power_linear`, `magnitude_dbsm`,
 `magnitude_dbke`, and/or `magnitude_db`; their names are never overloaded.
 `magnitude_power_linear` is always the stored nonnegative linear power: 3-D
@@ -136,19 +140,13 @@ Zoom Box retain their mouse controls while enabled.
 The current row is the active dataset: its parameter lists and axis units are
 the display reference. Other selected datasets may use compatible Hz/kHz/MHz/
 GHz or degree/radian storage; GRIM converts selections and labels without
-changing their files. Conic and great-circle charts, different great-circle
-frames, different physical quantities (`sigma_3d`, `sigma_2d`, or ratio), and
-different logarithmic conventions cannot be overlaid as though they were the
-same ordinate. To correct a file-format coordinate assumption, select the
-datasets and use **Geometry & Units → Set Coordinates** (also on the dataset
-right-click menu). Choose **Azimuth / Elevation (Conic)** or **Aspect / Pitch
-(Great Circle)**. The action creates and selects copies for plotting, preserving
-all angle values, sample order, power, and phase. For example, select matching
-PIO and PTM data and choose Azimuth / Elevation to overlay both as elevation
-cuts. The declaration supports nonzero cuts and every polarization; it performs
-no geometric conversion. Great-circle declarations include convention and
-roll/tilt fields. Save the corrected copies as `.grim` to retain the choice.
-The Python recorder uses `grid.set_angular_coordinate_system(...)` for replay.
+changing their files. Every file loads with plain azimuth/elevation axes,
+whatever its format; GRIM does not classify datasets as conic, great-circle,
+or any other angular coordinate system and does not block overlays on that
+basis. Make sure the datasets you plot together share a coordinate system.
+Different physical quantities (`sigma_3d`, `sigma_2d`, or ratio) and different
+logarithmic conventions still cannot be overlaid as though they were the same
+ordinate.
 
 RF Compare uses one explicit selected azimuth, elevation, or
 frequency sector per dataset and matches coordinates one-to-one. Its 0–100 RF
@@ -175,7 +173,7 @@ The yellow region marks that entered statistics range only when it is narrower
 than the full common azimuth span; a full-span comparison has no highlight.
 
 **Delta Map** beside RF Compare compares two selected datasets over any two
-of frequency, azimuth/aspect, and elevation/pitch. Select the displayed ranges
+of frequency, azimuth, and elevation. Select the displayed ranges
 and one polarization in the sidebar, then choose the horizontal/vertical axes
 and the fixed third coordinate above the plot. The fixed-coordinate dropdown
 contains the reference dataset's coordinates. Dataset A and B are named above
@@ -947,32 +945,11 @@ elevation/polarization slice. Use **Export as → PTM (.ptm)…** from the datas
 context menu. The interpreted legacy framing requires a 3-D `sigma_3d` field,
 phase, a uniform aspect axis, a positive strictly increasing uniform frequency
 axis, at least 37 frequency samples,
-and a documented `VV`, `HH`, `VH`, or `HV` polarization. PTM import assumes a
-great-circle cut; **Set Coordinates** overrides this assumption when the user
-knows the file contains azimuth/elevation data. A grid already tagged
-great-circle may carry any of those four
-polarizations. Direct export of conic data is limited to unrotated VV/HH at
-zero elevation, where GRIM defines signed GC aspect equal to conic azimuth;
-conic VH/HV remains rejected because an external PTM's H/V signs are not
-specified. GRIM marks files created under this convention as `GRIM_GC_V1` in
-the PTM configuration field. An unmarked legacy PTM remains tagged
-`legacy_ptm_unspecified`: the **Conic ↔ GC (0°)** tool will not reinterpret
-it unless the user explicitly confirms that its aspect sign/origin and V/H
-basis match GRIM's convention.
-
-General Conic↔Great-Circle conversion is blocked because a fixed-pitch GC cut
-maps to a curved conic path and the full conversion requires interpolation of
-complex IQ plus scattering-matrix polarization-basis rotation. The only
-lossless conversion offered in both directions is the unrotated, zero-plane
-VV/HH relabel under the declared `GRIM_GC_V1` convention. The angular
-convention is a physical
-compatibility field, so GRIM rejects arithmetic between great-circle PTM data
-and ordinary conic data even when their numeric axes happen to match. Stored
-PTM roll/tilt values are part of that compatibility check as well; GRIM does
-not apply them as rotations because the legacy reference does not define their
-Euler semantics. Native GRIM CSV
-preserves these fields; Pioneer export is refused for a great-circle grid
-because that header cannot represent the distinction. Because no formal PTM
+and a documented `VV`, `HH`, `VH`, or `HV` polarization. PTM aspect and pitch
+load directly as azimuth and elevation, and export writes the selected
+elevation as the PTM pitch; no coordinate conversion happens in either
+direction. Header roll/tilt are kept as PTM metadata only and are never
+applied as rotations. Because no formal PTM
 specification or known-good sample accompanied the reference code, byte-level
 interoperability with the originating program remains provisional until it is
 checked against one real file in each direction.

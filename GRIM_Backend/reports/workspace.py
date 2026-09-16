@@ -808,7 +808,7 @@ if GUI_AVAILABLE:
             self.plot_type_combo = QComboBox(plot_group)
             self.plot_type_combo.addItem("Azimuth — rectangular", "azimuth_rect")
             self.plot_type_combo.addItem("Azimuth — polar", "azimuth_polar")
-            self.plot_type_combo.addItem("Elevation / pitch sweep", "elevation")
+            self.plot_type_combo.addItem("Elevation sweep", "elevation")
             self.plot_type_combo.addItem("Frequency sweep", "frequency")
             plot_form.addRow("Plot type", self.plot_type_combo)
             self.elevation_label = QLabel("Elevation cut", plot_group)
@@ -1533,9 +1533,6 @@ if GUI_AVAILABLE:
                     False,
                     reason="Load a dataset with at least two common azimuth samples.",
                 )
-                self.azimuth_label.setText("Azimuth cut")
-                self.azimuth_band_label.setText("Azimuth band")
-                self.elevation_label.setText("Elevation cut")
                 self._set_axis_combo(self.elevation_combo, (), "")
                 self._set_axis_combo(self.azimuth_combo, (), "")
                 self._set_polarization_combo(())
@@ -1553,9 +1550,6 @@ if GUI_AVAILABLE:
                     False,
                     reason="Selected datasets do not have a usable common azimuth axis.",
                 )
-                self.azimuth_label.setText("Azimuth cut")
-                self.azimuth_band_label.setText("Azimuth band")
-                self.elevation_label.setText("Elevation cut")
                 self.dataset_summary_label.setText(
                     f"Selected datasets are not plot-compatible: {exc}"
                 )
@@ -1565,19 +1559,6 @@ if GUI_AVAILABLE:
                 self._set_frequency_choices((), "")
                 return
             self._availability = availability
-            great_circle = (
-                str(getattr(availability, "angular_coordinate_system", "conic"))
-                == "great_circle"
-            )
-            self.azimuth_label.setText(
-                "Aspect cut" if great_circle else "Azimuth cut"
-            )
-            self.azimuth_band_label.setText(
-                "Aspect band" if great_circle else "Azimuth band"
-            )
-            self.elevation_label.setText(
-                "Pitch cut" if great_circle else "Elevation cut"
-            )
             angle_unit = str(
                 getattr(
                     availability,
@@ -2255,14 +2236,6 @@ if GUI_AVAILABLE:
                         "A single PPT report is limited to 60 angular-cut frequencies "
                         "(10 slides) to keep preview and export responsive. Select a "
                         "smaller frequency group and create additional reports as needed."
-                    )
-                if kind == "azimuth_polar" and not bool(
-                    getattr(availability, "polar_available", True)
-                ):
-                    raise ValueError(
-                        "Polar plotting is unavailable for the selected azimuth axis. "
-                        "Use rectangular azimuth or choose datasets with compatible "
-                        "angular coverage."
                     )
                 if kind == "elevation":
                     azimuth = self.azimuth_combo.currentData()

@@ -649,12 +649,6 @@ class PioFormatMixin:
         """
         from GRIM_Backend.datasets.constants import _ANGLE_UNITS, _FREQUENCY_UNITS, _PIO_WRITE_BLOCK_CELLS
         from GRIM_Backend.io.pioneer import _pio_ascii_metadata, _pio_remove_closed_azimuth_endpoint
-        if self.angular_coordinate_system() != "conic":
-            raise ValueError(
-                "save_pio: Pioneer azimuth/elevation output cannot represent "
-                f"{self.angular_coordinate_system()!r} angular coordinates; "
-                "retain .grim or use PTM for a great-circle cut"
-            )
         quantity = self.linear_quantity()
         if quantity != "sigma_3d":
             if quantity == "sigma_2d":

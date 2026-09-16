@@ -146,8 +146,8 @@ def render(self) -> None:
     )[:, 0, :, 0]
     if not np.any(np.isfinite(rcs_slice)):
         self.status.showMessage(
-            "No compatible phase-aware data for the selected azimuth/aspect, "
-            "elevation/pitch, frequency, and polarization values."
+            "No compatible phase-aware data for the selected azimuth, "
+            "elevation, frequency, and polarization values."
         )
         return
     # IFFT along frequency requires a uniform grid. Preserve missing bands and

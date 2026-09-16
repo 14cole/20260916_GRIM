@@ -20,11 +20,11 @@ def render(self) -> None:
 
     elev_values = np.asarray(sorted(self._selected_values(self.list_elev)), dtype=float)
     if elev_values.size == 0:
-        self.status.showMessage("Select one or more elevations/pitches to plot.")
+        self.status.showMessage("Select one or more elevations to plot.")
         return
     az_values = np.asarray(sorted(self._selected_values(self.list_az)), dtype=float)
     if az_values.size == 0:
-        self.status.showMessage("Select one or more azimuths/aspects to plot.")
+        self.status.showMessage("Select one or more azimuths to plot.")
         return
     freq_values = np.asarray(sorted(self._selected_values(self.list_freq)), dtype=float)
     if freq_values.size == 0:
@@ -65,13 +65,13 @@ def render(self) -> None:
     if not plans:
         detail = f" Skipped: {', '.join(skipped)}." if skipped else ""
         self.status.showMessage(
-            "No compatible data for the selected elevation/pitch, azimuth/aspect, "
+            "No compatible data for the selected elevation, azimuth, "
             f"frequency, and polarization values.{detail}"
         )
         return
     try:
         common.validate_synchronous_plot_workload(
-            operation="Elevation/Pitch sweep",
+            operation="Elevation sweep",
             peak_slice_cells=peak_slice_cells,
             total_cells=total_cells,
         )
@@ -146,7 +146,7 @@ def render(self) -> None:
     if rendered == 0:
         detail = f" Skipped: {', '.join(skipped)}." if skipped else ""
         self.status.showMessage(
-            "No compatible data for the selected elevation/pitch, azimuth/aspect, "
+            "No compatible data for the selected elevation, azimuth, "
             f"frequency, and polarization values.{detail}"
         )
         return
@@ -168,7 +168,7 @@ def render(self) -> None:
     self.spin_plot_xmin.blockSignals(False)
     self.spin_plot_xmax.blockSignals(False)
     self._apply_plot_limits()
-    status = "Elevation/Pitch sweep plot updated."
+    status = "Elevation sweep plot updated."
     if skipped:
         status = f"{status[:-1]} Skipped: {', '.join(skipped)}."
     self._show_plot_status(status)

@@ -17,7 +17,9 @@ from GRIM_Backend.datasets.constants import (
 )
 from GRIM_Backend.datasets.coordinates import (
     GridCoordinatesMixin,
+    # Re-exported: the GHOST data-tools bridge reads it from this module.
     canonical_angular_coordinate_system,
+    strip_angular_coordinate_declarations,
 )
 from GRIM_Backend.datasets.memory import _real_storage_dtype
 from GRIM_Backend.datasets.metadata import GridMetadataMixin
@@ -191,24 +193,10 @@ class RcsGrid(
                     np.subtract(self.rcs_phase, np.pi, out=self.rcs_phase)
 
 
-        unit_coordinate = self.units.get("angular_coordinate_system")
-        extra_coordinate = self.extra.get("angular_coordinate_system")
-        if (
-            (unit_coordinate is None or str(unit_coordinate).strip() == "")
-            and extra_coordinate is not None
-            and str(extra_coordinate).strip() != ""
-        ):
-            self.units["angular_coordinate_system"] = (
-                canonical_angular_coordinate_system(extra_coordinate)
-            )
-        if self.angular_coordinate_system() == "great_circle":
-            self.units.setdefault(
-                "great_circle_coordinate_convention",
-                self.great_circle_coordinate_convention(),
-            )
-            roll, tilt = self.angular_frame_orientation_deg()
-            self.units.setdefault("angular_roll_deg", roll)
-            self.units.setdefault("angular_tilt_deg", tilt)
+        # Every dataset uses plain azimuth/elevation axes. Coordinate-system
+        # declarations from files or older sessions are dropped; the user is
+        # responsible for only overlaying data that share a coordinate system.
+        strip_angular_coordinate_declarations(self.units, self.extra)
 
     @staticmethod
     def _clean_power(power_value):

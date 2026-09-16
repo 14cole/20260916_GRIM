@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtWidgets import QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPlainTextEdit, QRadioButton, QSpinBox, QVBoxLayout
-from GRIM_Backend.datasets.constants import GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION
 from GRIM_Backend.datasets.grid import RcsGrid
-from GRIM_Backend.datasets.coordinates import canonical_angular_coordinate_system
 
 
 _FREQUENCY_TO_HZ = {
@@ -143,13 +141,9 @@ class CropDialog(QDialog):
         frequency_unit = _canonical_frequency_unit(
             (reference.units or {}).get("frequency", "GHz")
         )
-        if reference.angular_coordinate_system() == "great_circle":
-            azimuth_label, elevation_label = "Aspect", "Pitch"
-        else:
-            azimuth_label, elevation_label = "Azimuth", "Elevation"
         specs = (
-            ("azimuth", f"{azimuth_label} (deg)", az),
-            ("elevation", f"{elevation_label} (deg)", el),
+            ("azimuth", "Azimuth (deg)", az),
+            ("elevation", "Elevation (deg)", el),
             ("frequency", f"Frequency ({frequency_unit})", freq),
         )
         for row, (axis, label, values) in enumerate(specs, start=1):
@@ -241,8 +235,6 @@ class RegridDialog(QDialog):
         grid.addWidget(QLabel("Axis:"), 0, 0)
         self._axis = QComboBox()
         axis_labels = dict(self._AXIS_LABELS)
-        if reference.angular_coordinate_system() == "great_circle":
-            axis_labels.update(azimuth="Aspect", elevation="Pitch")
         for key in ("azimuth", "elevation", "frequency"):
             self._axis.addItem(axis_labels[key], key)
         grid.addWidget(self._axis, 0, 1)
@@ -1044,8 +1036,8 @@ class DecimateDialog(QDialog):
         layout.addWidget(note)
         grid = QGridLayout()
         self._axis = QComboBox()
-        self._axis.addItem("Azimuth / Aspect", "azimuth")
-        self._axis.addItem("Elevation / Pitch", "elevation")
+        self._axis.addItem("Azimuth", "azimuth")
+        self._axis.addItem("Elevation", "elevation")
         self._axis.addItem("Frequency", "frequency")
         self._factor = QSpinBox()
         self._factor.setRange(2, 1_000_000)
@@ -1246,8 +1238,8 @@ class AxisUnitsDialog(QDialog):
         self._elevation.setCurrentText(current_el)
         self._frequency.setCurrentText(current_frequency)
         for row, (label, combo) in enumerate((
-            ("Azimuth / Aspect:", self._azimuth),
-            ("Elevation / Pitch:", self._elevation),
+            ("Azimuth:", self._azimuth),
+            ("Elevation:", self._elevation),
             ("Frequency:", self._frequency),
         )):
             grid.addWidget(QLabel(label), row, 0)
@@ -1263,146 +1255,6 @@ class AxisUnitsDialog(QDialog):
             "azimuth": self._azimuth.currentText(),
             "elevation": self._elevation.currentText(),
             "frequency": self._frequency.currentText(),
-        }
-
-class CoordinateSystemDialog(QDialog):
-    """Let the user correct an imported coordinate interpretation."""
-
-    def __init__(self, reference: RcsGrid, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Set Coordinates")
-        layout = QVBoxLayout(self)
-        note = QLabel(
-            "Choose what the stored angles represent, regardless of file format. "
-            "Creates selected copies with unchanged angle values, sample order, "
-            "power, and phase. This does not perform a coordinate conversion."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        self._system = QComboBox()
-        self._system.addItem("Azimuth / Elevation (Conic)", "conic")
-        self._system.addItem("Aspect / Pitch (Great Circle)", "great_circle")
-        self._system.setCurrentIndex(
-            max(0, self._system.findData(reference.angular_coordinate_system()))
-        )
-        layout.addWidget(self._system)
-        self._gc_options = QGroupBox("Great-circle frame")
-        frame_layout = QGridLayout(self._gc_options)
-        self._convention = QComboBox()
-        self._convention.addItem("PTM / unspecified", LEGACY_PTM_GC_CONVENTION)
-        self._convention.addItem("GRIM convention", GRIM_GC_CONVENTION)
-        self._convention.setCurrentIndex(max(
-            0, self._convention.findData(reference.great_circle_coordinate_convention())
-        ))
-        frame_layout.addWidget(QLabel("Convention"), 0, 0)
-        frame_layout.addWidget(self._convention, 0, 1)
-        roll, tilt = reference.angular_frame_orientation_deg()
-        self._roll, self._tilt = QDoubleSpinBox(), QDoubleSpinBox()
-        for row, label, spin, value in (
-            (1, "Roll (deg)", self._roll, roll),
-            (2, "Tilt (deg)", self._tilt, tilt),
-        ):
-            spin.setRange(-360.0, 360.0)
-            spin.setDecimals(6)
-            spin.setValue(value)
-            frame_layout.addWidget(QLabel(label), row, 0)
-            frame_layout.addWidget(spin, row, 1)
-        layout.addWidget(self._gc_options)
-        self._system.currentIndexChanged.connect(self._update_frame_options)
-        self._update_frame_options()
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def _update_frame_options(self, *_args) -> None:
-        self._gc_options.setVisible(self._system.currentData() == "great_circle")
-
-    def get_params(self) -> dict:
-        params = {"coordinate_system": self._system.currentData()}
-        if params["coordinate_system"] == "great_circle":
-            params.update(
-                gc_convention=self._convention.currentData(),
-                roll_deg=self._roll.value(), tilt_deg=self._tilt.value(),
-            )
-        return params
-
-class ConicGCDialog(QDialog):
-    """Expose only GRIM's exact, convention-tagged equatorial relabel.
-
-    A general conic/great-circle conversion changes both the sampling path and
-    polarization basis.  GRIM does not yet implement the full scattering-matrix
-    basis rotation, and a fixed-pitch PTM cut maps to a curved conic path rather
-    than a rectangular :class:`RcsGrid`.  The one exact exception is an
-    unrotated, zero-pitch, co-polar great-circle cut, which can be relabeled as
-    the same conic equatorial cut without changing VV or HH.
-    """
-
-    def __init__(
-        self,
-        source_coordinate_system=None,
-        source_gc_convention=None,
-        parent=None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Convert Conic ↔ Great-Circle (Equator)")
-        layout = QVBoxLayout(self)
-
-        layout.addWidget(QLabel(
-            "This is an exact tag change only: one 0° elevation/pitch, stored "
-            "roll=tilt=0°, and VV/HH. GRIM defines signed GC aspect equal to "
-            "conic azimuth on this plane; no field interpolation occurs. General "
-            "GC cuts need a curved-path representation and Jones-basis rotation."
-        ))
-
-        dir_group = QGroupBox("Direction")
-        dir_layout = QVBoxLayout(dir_group)
-        self._radio_c2g = QRadioButton(
-            "Conic → Great-Circle (create a GRIM_GC_V1-tagged equatorial cut)"
-        )
-        self._radio_g2c = QRadioButton(
-            "Great-Circle → Conic (same exact equatorial convention)"
-        )
-        if canonical_angular_coordinate_system(source_coordinate_system) == "great_circle":
-            self._radio_g2c.setChecked(True)
-        else:
-            self._radio_c2g.setChecked(True)
-        dir_layout.addWidget(self._radio_c2g)
-        dir_layout.addWidget(self._radio_g2c)
-        layout.addWidget(dir_group)
-
-        mode_group = QGroupBox("Mode")
-        mode_layout = QVBoxLayout(mode_group)
-        self._radio_relabel = QRadioButton("Exact equatorial relabel (no interpolation)")
-        self._radio_regrid = QRadioButton(
-            "General re-grid (unavailable until polarization-basis rotation is implemented)"
-        )
-        self._radio_relabel.setChecked(True)
-        self._radio_regrid.setEnabled(False)
-        mode_layout.addWidget(self._radio_relabel)
-        mode_layout.addWidget(self._radio_regrid)
-        layout.addWidget(mode_group)
-
-        convention_note = QLabel(
-            "For an unmarked legacy PTM, choosing GC→Conic records GRIM_GC_V1 "
-            "as an operation assumption. Explicitly incompatible convention tags "
-            "remain unsupported."
-        )
-        convention_note.setWordWrap(True)
-        layout.addWidget(convention_note)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
-
-    def get_params(self) -> dict:
-        return {
-            "direction": (
-                "conic_to_gc" if self._radio_c2g.isChecked() else "gc_to_conic"
-            ),
-            "mode": "relabel",
-            "attest_legacy_ptm_convention": False,
         }
 
 class WedgeConicDialog(QDialog):
@@ -1431,8 +1283,8 @@ class WedgeConicDialog(QDialog):
 
         axes_note = QLabel(
             "Choosing this operation treats azimuth as rotation about fixed world "
-            "+z and elevation as article pitch about body +y. If the source lacks "
-            "an axis tag, that assumption is stored with the converted dataset."
+            "+z and elevation as article pitch about body +y. That assumption is "
+            "stored with the converted dataset."
         )
         axes_note.setWordWrap(True)
         layout.addWidget(axes_note)

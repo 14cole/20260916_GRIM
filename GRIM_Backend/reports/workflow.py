@@ -93,7 +93,7 @@ def current_plot_report_setup(window):
     state=window.ppt_workspace.capture_report_setup()
     state['selected']=selected
     state['order']=selected+[k for k in state['order'] if k not in selected]
-    state['units']={key:getattr(availability,key) for key in ('azimuth_unit','elevation_unit','frequency_unit','rcs_unit','angular_coordinate_system')}
+    state['units']={key:getattr(availability,key) for key in ('azimuth_unit','elevation_unit','frequency_unit','rcs_unit')}
     mode='elevation' if spec[3]=='elevation_sweep' else spec[3]
     state['combos']['plot_type_combo']=mode
     state['combos']['frequency_azimuth_mode_combo']='exact'
@@ -177,7 +177,7 @@ class ReportWorkflowMixin:
     def capture_report_setup(self):
         units = {}
         if self._availability:
-            units = {key:getattr(self._availability,key) for key in ('azimuth_unit','elevation_unit','frequency_unit','rcs_unit','angular_coordinate_system')}
+            units = {key:getattr(self._availability,key) for key in ('azimuth_unit','elevation_unit','frequency_unit','rcs_unit')}
         return dict(combos={key:_plain(getattr(self,key).currentData()) for key in COMBOS},
                     spins={key:getattr(self,key).value() for key in SPINS},
                     texts={key:getattr(self,key).text() for key in TEXTS},
@@ -265,8 +265,10 @@ class ReportWorkflowMixin:
         combos=dict(value['combos'])
         spins=dict(value['spins'])
         if strict and value['units'] and self._availability:
-            new={k:getattr(self._availability,k) for k in value['units']}
-            for k in ('rcs_unit','angular_coordinate_system'):
+            # Recipes saved before coordinate systems were removed may still
+            # carry an angular_coordinate_system entry; it is ignored.
+            new={k:getattr(self._availability,k) for k in value['units'] if k!='angular_coordinate_system'}
+            for k in ('rcs_unit',):
                 if new[k]!=value['units'][k]: raise ValueError(f'Recipe {k} differs from the current datasets. Use a matching report definition.')
             factors={'deg':1.,'rad':180/math.pi,'GHz':1.,'MHz':1e-3,'kHz':1e-6,'Hz':1e-9}
             for axis,field in [('elevation','elevation_combo'),('azimuth','azimuth_combo')]:

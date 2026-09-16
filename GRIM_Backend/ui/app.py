@@ -487,20 +487,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "target or remove target/support interaction terms."
         )
         _ops_pad("Geometry & Units", (
-            ("Set Coordinates", "btn_set_coordinates"),
             ("Axis Units…", "btn_axis_units"),
             ("El→Az360", "btn_el_to_az360"),
             ("Swap El/Az", "btn_swap_el_az"),
             ("SENTRi El→GRIM", "btn_sentri_elevation"),
             ("Extrusion…", "btn_extrusion"),
-            ("Conic ↔ GC (0°)", "btn_conic_gc"),
             ("Wedge → Conic", "btn_wedge_to_conic"),
         ))
-        self.btn_set_coordinates.setToolTip(
-            "Declare selected datasets as Azimuth/Elevation or Aspect/Pitch, "
-            "regardless of file format. Creates selected copies with unchanged "
-            "numeric axes, power, and phase; no coordinate conversion."
-        )
         self.btn_axis_units.setToolTip(
             "Convert stored angle and frequency coordinates between equivalent "
             "units without interpolating or changing any response sample."
@@ -511,11 +504,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "top-down, -90° bottom-up). Samples are reordered with the "
             "monotonically increasing elevation axis; no interpolation or "
             "phase change is applied."
-        )
-        self.btn_conic_gc.setToolTip(
-            "Exact 0° Conic/Great-Circle relabel only. General GC cuts are "
-            "blocked because they require curved-path complex interpolation "
-            "and polarization-basis rotation."
         )
         self.btn_wedge_to_conic.setToolTip(
             "Convert a vertical-turntable/body-y-wedge acquisition into the "
@@ -962,13 +950,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_duplicate.clicked.connect(self._duplicate_selected)
         self.btn_el_to_az360.clicked.connect(self._elevation_to_azimuth_360_selected)
         self.btn_swap_el_az.clicked.connect(self._swap_elevation_azimuth_selected)
-        self.btn_set_coordinates.clicked.connect(self._set_coordinates_selected)
         self.btn_axis_units.clicked.connect(self._convert_axis_units_selected)
         self.btn_sentri_elevation.clicked.connect(
             self._convert_sentri_elevation_selected
         )
         self.btn_extrusion.clicked.connect(self._convert_extrusion_selected)
-        self.btn_conic_gc.clicked.connect(self._convert_conic_gc_selected)
         self.btn_wedge_to_conic.clicked.connect(self._convert_wedge_to_conic_selected)
         self.btn_dataset_load.clicked.connect(self._load_dataset_files)
         self.btn_dataset_save.clicked.connect(self._save_selected_datasets)

@@ -119,9 +119,6 @@ def reference_dataset(named_datasets, active_dataset=None):
 
 
 def angular_axis_name(dataset, axis: str) -> str:
-    coordinate_system = dataset.angular_coordinate_system()
-    if coordinate_system == "great_circle":
-        return "Aspect" if axis == "azimuth" else "Pitch"
     return "Azimuth" if axis == "azimuth" else "Elevation"
 
 
@@ -223,12 +220,12 @@ def coherent_metadata_plot_warnings(named_datasets) -> tuple[str, ...]:
 
 
 def validate_plot_datasets(named_datasets, *, phase: bool, linear: bool) -> None:
-    """Fail before rendering incompatible physical quantities or coordinates.
+    """Fail before rendering incompatible physical quantities.
 
-    Coordinate units may differ because the modes convert them. Coordinate
-    *systems* may not: conic azimuth/elevation and great-circle aspect/pitch
-    do not describe the same chart even when their numeric arrays happen to
-    match. Likewise, unlike linear quantities cannot share one ordinate.
+    Coordinate units may differ because the modes convert them. All angle axes
+    are treated as azimuth/elevation; overlaying data from different angular
+    coordinate systems is the user's responsibility. Unlike linear quantities
+    cannot share one ordinate.
     """
 
     if not named_datasets:
@@ -257,36 +254,6 @@ def validate_plot_datasets(named_datasets, *, phase: bool, linear: bool) -> None
             )
             raise ValueError(
                 f"mixed physical quantities cannot share a plot ({details})"
-            )
-
-    coordinate_systems = {dataset.angular_coordinate_system() for _, dataset in named_datasets}
-    if len(coordinate_systems) != 1:
-        details = ", ".join(
-            f"{name}={dataset.angular_coordinate_system()}" for name, dataset in named_datasets
-        )
-        raise ValueError(
-            f"mixed angular coordinate systems cannot share a plot ({details}). "
-            "If the files contain the same coordinate system, select them and use "
-            "Geometry & Units > Set Coordinates to correct the import interpretation."
-        )
-
-    if next(iter(coordinate_systems)) == "great_circle":
-        conventions = {
-            dataset.great_circle_coordinate_convention() for _, dataset in named_datasets
-        }
-        if len(conventions) != 1:
-            raise ValueError(
-                "great-circle datasets use different aspect/pitch conventions. "
-                "Use Geometry & Units > Set Coordinates to declare their convention."
-            )
-        orientations = [dataset.angular_frame_orientation_deg() for _, dataset in named_datasets]
-        if any(
-            not np.allclose(orientations[0], orientation, rtol=0.0, atol=1.0e-7)
-            for orientation in orientations[1:]
-        ):
-            raise ValueError(
-                "great-circle datasets use different roll/tilt frames. "
-                "Use Geometry & Units > Set Coordinates to declare their frame."
             )
 
     # Linear plots already share the same modeled physical quantity. In a dB

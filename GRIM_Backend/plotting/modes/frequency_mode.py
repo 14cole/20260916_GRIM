@@ -115,11 +115,11 @@ def render(self) -> None:
         return
     az_values = np.asarray(sorted(self._selected_values(self.list_az)), dtype=float)
     if az_values.size == 0:
-        self.status.showMessage("Select one or more azimuths/aspects to plot.")
+        self.status.showMessage("Select one or more azimuths to plot.")
         return
     elev_values = np.asarray(sorted(self._selected_values(self.list_elev)), dtype=float)
     if elev_values.size == 0:
-        self.status.showMessage("Select one or more elevations/pitches to plot.")
+        self.status.showMessage("Select one or more elevations to plot.")
         return
     polarization = self._single_selection_value(self.list_pol, "polarization")
     if polarization is None:
@@ -154,8 +154,8 @@ def render(self) -> None:
     if not plans:
         detail = f" Skipped: {', '.join(skipped)}." if skipped else ""
         self.status.showMessage(
-            "No compatible data for the selected frequency, azimuth/aspect, "
-            f"elevation/pitch, and polarization values.{detail}"
+            "No compatible data for the selected frequency, azimuth, "
+            f"elevation, and polarization values.{detail}"
         )
         return
     try:
@@ -237,8 +237,8 @@ def render(self) -> None:
     if rendered == 0:
         detail = f" Skipped: {', '.join(skipped)}." if skipped else ""
         self.status.showMessage(
-            "No compatible data for the selected frequency, azimuth/aspect, "
-            f"elevation/pitch, and polarization values.{detail}"
+            "No compatible data for the selected frequency, azimuth, "
+            f"elevation, and polarization values.{detail}"
         )
         return
     if omitted:

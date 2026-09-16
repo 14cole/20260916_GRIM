@@ -607,7 +607,6 @@ def audit_dataset(self):
     try:
         metadata_metric["linear_quantity"] = self.linear_quantity()
         metadata_metric["log_unit"] = self.default_log_unit()
-        metadata_metric["angular_coordinate_system"] = self.angular_coordinate_system()
         if metadata_metric["linear_quantity"] not in {
             "sigma_3d", "sigma_2d", "power_ratio"
         }:

@@ -141,7 +141,6 @@ class WedgePhysicsTests(unittest.TestCase):
             rtol=2.0e-14,
             atol=2.0e-14,
         )
-        self.assertEqual(converted.angular_coordinate_system(), "conic")
         self.assertEqual(
             converted.units["polarization_basis"], CONIC_VH_BASIS_CONVENTION
         )

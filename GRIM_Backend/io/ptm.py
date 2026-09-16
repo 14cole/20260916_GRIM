@@ -604,8 +604,6 @@ def header_to_extra(header: PtmHeader) -> dict[str, object]:
     """Map PTM header metadata to pickle-free grid extras."""
 
     out: dict[str, object] = {
-        "angular_coordinate_system": "great_circle",
-        "ptm_cut_type": "GC",
         "ptm_original_byte_order": header.byte_order,
         "ptm_original_num_aspects": int(header.num_aspects),
         "ptm_original_start_aspect": float(header.start_aspect),
@@ -661,28 +659,19 @@ class PtmFormatMixin:
 
     @classmethod
     def load_ptm(cls, path):
-        """Load one PTM great-circle RCS cut.
+        """Load one PTM RCS cut.
 
-        The file supplies one polarization and pitch, uniformly spaced aspect and
-        GHz frequency axes, and complex float32 IQ samples. The output contains 3-D
-        RCS power/phase arrays and the great-circle coordinate convention.
+        The file supplies one polarization and elevation, uniformly spaced
+        azimuth and GHz frequency axes, and complex float32 IQ samples. The
+        output contains 3-D RCS power/phase arrays on plain azimuth/elevation
+        axes; header roll/tilt are kept only as PTM metadata.
         """
-        from GRIM_Backend.datasets.constants import GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION
-        from GRIM_Backend.io.ptm import _ptm_configuration_has_grim_gc_marker
-
         parsed = read_ptm(path)
         header = parsed.header
-        gc_convention = (
-            GRIM_GC_CONVENTION
-            if _ptm_configuration_has_grim_gc_marker(header.configuration)
-            else LEGACY_PTM_GC_CONVENTION
-        )
         header_extra = header_to_extra(header)
-        header_extra["great_circle_coordinate_convention"] = gc_convention
-        header_extra["ptm_cut_type_source"] = "legacy_reader_assumption_not_header"
         complex_grid = parsed.iq[:, np.newaxis, :, np.newaxis]
         history = (
-            f"Loaded PTM great-circle cut ({header.num_aspects} aspects, "
+            f"Loaded PTM cut ({header.num_aspects} aspects, "
             f"{header.num_frequencies} freqs, {header.polarity}, "
             f"{header.byte_order}-endian): {path}"
         )
@@ -701,10 +690,6 @@ class PtmFormatMixin:
                 "frequency": "GHz",
                 "rcs_log_unit": "dBsm",
                 "rcs_linear_quantity": "sigma_3d",
-                "angular_coordinate_system": "great_circle",
-                "great_circle_coordinate_convention": gc_convention,
-                "angular_roll_deg": float(header.roll),
-                "angular_tilt_deg": float(header.tilt),
             },
             extra=header_extra,
         )
@@ -717,8 +702,7 @@ class PtmFormatMixin:
         polarizations in one file.  Callers must select one slice when the grid
         contains more than one elevation or polarization.
         """
-        from GRIM_Backend.datasets.constants import GRIM_GC_CONVENTION
-        from GRIM_Backend.io.ptm import _ptm_configuration_with_grim_gc_marker, _ptm_configuration_without_grim_gc_marker
+        from GRIM_Backend.io.ptm import _ptm_configuration_without_grim_gc_marker
 
         if self.linear_quantity() != "sigma_3d":
             raise ValueError(
@@ -763,35 +747,7 @@ class PtmFormatMixin:
             self._frequency_value_to_hz(self.frequencies), dtype=float
         ) / 1.0e9
 
-        coordinate_system = self.angular_coordinate_system()
-        if coordinate_system not in {"conic", "great_circle"}:
-            raise ValueError(
-                "save_ptm: angular coordinate system must be explicitly "
-                f"conic or great_circle; got {coordinate_system!r}"
-            )
-        is_great_circle = coordinate_system == "great_circle"
         selected_polarity = str(self.polarizations[pol_idx]).strip().upper()
-        if not is_great_circle:
-            if not np.isclose(pitch_deg, 0.0, atol=1.0e-9, rtol=0.0):
-                raise ValueError(
-                    "save_ptm: PTM uses great-circle aspect/pitch coordinates; "
-                    "a nonzero-elevation conic/untagged slice cannot be "
-                    "exported without a physical basis/path conversion"
-                )
-            roll_deg, tilt_deg = self.angular_frame_orientation_deg()
-            if not np.allclose(
-                (roll_deg, tilt_deg), (0.0, 0.0), rtol=0.0, atol=1.0e-9
-            ):
-                raise ValueError(
-                    "save_ptm: direct conic-equator export requires "
-                    "roll=tilt=0 degrees"
-                )
-            if selected_polarity in {"VH", "HV"}:
-                raise ValueError(
-                    "save_ptm: direct conic-equator PTM export supports VV/HH "
-                    "only; cross-polar data requires explicit polarization-basis "
-                    "rotation"
-                )
 
         power_slice = self.rcs_power[:, el_idx, :, pol_idx]
         phase_slice = self.rcs_phase[:, el_idx, :, pol_idx]
@@ -820,31 +776,15 @@ class PtmFormatMixin:
                 f"save_ptm: slice shape {complex_slice.shape} != {expected_shape}"
             )
 
-        header_extra = dict(self.extra or {})
-        roll_deg, tilt_deg = self.angular_frame_orientation_deg()
-        header_extra["ptm_roll"] = roll_deg
-        header_extra["ptm_tilt"] = tilt_deg
-        header = header_from_extra(header_extra)
-
-
-        convention_is_known = (
-            not is_great_circle
-            or self.great_circle_coordinate_convention() == GRIM_GC_CONVENTION
+        header = header_from_extra(self.extra)
+        # Elevation is written as the PTM pitch without any coordinate-system
+        # claim, so drop GRIM's old great-circle convention marker.
+        header = replace(
+            header,
+            configuration=_ptm_configuration_without_grim_gc_marker(
+                header.configuration
+            ),
         )
-        marker_scope_is_trusted = (
-            convention_is_known
-            and np.isclose(pitch_deg, 0.0, atol=1.0e-9, rtol=0.0)
-            and np.allclose(
-                (roll_deg, tilt_deg), (0.0, 0.0), rtol=0.0, atol=1.0e-9
-            )
-            and selected_polarity in {"VV", "HH"}
-        )
-        configuration = (
-            _ptm_configuration_with_grim_gc_marker(header.configuration)
-            if marker_scope_is_trusted
-            else _ptm_configuration_without_grim_gc_marker(header.configuration)
-        )
-        header = replace(header, configuration=configuration)
         return write_ptm(
             path,
             aspects_deg,

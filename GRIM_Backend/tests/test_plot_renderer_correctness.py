@@ -9,7 +9,6 @@ from unittest import mock
 import numpy as np
 from matplotlib.figure import Figure
 
-from GRIM_Backend.datasets.constants import GRIM_GC_CONVENTION
 from GRIM_Backend.datasets.grid import RcsGrid
 from GRIM_Backend.plotting.actions import (
     PlotOpsMixin,
@@ -58,8 +57,6 @@ def _grid(
         "rcs_linear_quantity": quantity,
         "rcs_log_unit": log_unit,
     }
-    if coordinate_system == "great_circle":
-        units["great_circle_coordinate_convention"] = GRIM_GC_CONVENTION
     return RcsGrid(
         azimuths,
         elevations,
@@ -166,15 +163,14 @@ class PlotRendererHelperTests(unittest.TestCase):
                 linear=False,
             )
 
-    def test_mixed_coordinate_charts_are_blocked_and_gc_labels_are_dynamic(self):
+    def test_coordinate_system_tags_never_block_plots_or_change_labels(self):
         conic = _grid()
         great_circle = _grid(coordinate_system="great_circle")
-        with self.assertRaisesRegex(ValueError, "mixed angular coordinate systems"):
-            common.validate_plot_datasets(
-                [("conic", conic), ("gc", great_circle)], phase=False, linear=False
-            )
-        self.assertEqual(common.axis_label(great_circle, "azimuth"), "Aspect (deg)")
-        self.assertEqual(common.axis_label(great_circle, "elevation"), "Pitch (deg)")
+        common.validate_plot_datasets(
+            [("conic", conic), ("gc", great_circle)], phase=False, linear=False
+        )
+        self.assertEqual(common.axis_label(great_circle, "azimuth"), "Azimuth (deg)")
+        self.assertEqual(common.axis_label(great_circle, "elevation"), "Elevation (deg)")
 
     def test_phase_metadata_disagreement_warns_without_blocking_read_only_plot(self):
         left = _grid(phase_reference="nose")

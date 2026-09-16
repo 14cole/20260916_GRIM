@@ -1,4 +1,4 @@
-"""Conic, great-circle, wedge, and SENTRi coordinate transforms."""
+"""Wedge, SENTRi, and elevation-pair coordinate transforms."""
 from __future__ import annotations
 
 import copy
@@ -8,8 +8,6 @@ import numpy as np
 
 from GRIM_Backend.datasets.constants import (
     CONIC_VH_BASIS_CONVENTION,
-    GRIM_GC_CONVENTION,
-    LEGACY_PTM_GC_CONVENTION,
     WEDGE_TURNTABLE_CONVENTION,
     _ADOPT_CLEAN_ARRAYS_TOKEN,
     _ANGLE_UNITS,
@@ -191,139 +189,44 @@ def canonical_angular_coordinate_system(value):
     return aliases.get(text, text)
 
 
+_ANGULAR_DECLARATION_UNIT_KEYS = (
+    "great_circle_coordinate_convention",
+    "angular_roll_deg",
+    "angular_tilt_deg",
+)
+_ANGULAR_DECLARATION_EXTRA_KEYS = (
+    "great_circle_coordinate_convention",
+    "angular_coordinate_declaration_json",
+    "great_circle_conversion_assumption_json",
+    "ptm_cut_type",
+    "ptm_cut_type_source",
+)
+
+
+def strip_angular_coordinate_declarations(units, extra):
+    """Drop great-circle and other non-azimuth/elevation chart declarations.
+
+    GRIM treats every dataset's angle axes as azimuth/elevation. A plain
+    ``conic`` tag is kept for downstream consumers that expect it; anything
+    else (great-circle, wedge-turntable, ...) and its frame metadata is
+    removed in place.
+    """
+
+    for container in (units, extra):
+        declared = container.get("angular_coordinate_system")
+        if (
+            declared is not None
+            and canonical_angular_coordinate_system(declared) != "conic"
+        ):
+            container.pop("angular_coordinate_system", None)
+    for key in _ANGULAR_DECLARATION_UNIT_KEYS:
+        units.pop(key, None)
+    for key in _ANGULAR_DECLARATION_EXTRA_KEYS:
+        extra.pop(key, None)
+
+
 class GridCoordinatesMixin:
-    """Conic, great-circle, wedge, and SENTRi coordinate transforms."""
-
-    def angular_coordinate_system(self):
-        """Return the angular chart: conic azimuth/elevation or great-circle
-        aspect/pitch.
-        """
-        raw = (self.units or {}).get("angular_coordinate_system")
-        if raw is None or str(raw).strip() == "":
-            raw = (self.extra or {}).get("angular_coordinate_system", "")
-        return canonical_angular_coordinate_system(raw)
-
-    def angular_frame_orientation_deg(self):
-        """Return great-circle/PTM roll and tilt metadata in degrees.
-
-        Coordinate conversion requires both values to be zero.
-        """
-
-        values = []
-        for unit_key, extra_key in (
-            ("angular_roll_deg", "ptm_roll"),
-            ("angular_tilt_deg", "ptm_tilt"),
-        ):
-            raw = (self.units or {}).get(unit_key)
-            if raw is None or str(raw).strip() == "":
-                raw = (self.extra or {}).get(extra_key, 0.0)
-            array = np.asarray(raw)
-            if array.size != 1:
-                raise ValueError(f"{unit_key} must be scalar")
-            value = float(array.reshape(-1)[0])
-            if not np.isfinite(value):
-                raise ValueError(f"{unit_key} must be finite")
-            values.append(value)
-        return tuple(values)
-
-    def set_angular_coordinate_system(
-        self, coordinate_system, *,
-        gc_convention=LEGACY_PTM_GC_CONVENTION, roll_deg=0.0, tilt_deg=0.0,
-    ):
-        """Declare the meaning of existing angles and return an independent copy.
-
-        This explicitly overrides import assumptions; it is not a geometric
-        conversion. Numeric axes, sample order, polarizations, power, and phase
-        are preserved exactly, including nonzero cuts and cross-polar channels.
-        Great-circle declarations also specify their convention and frame.
-        """
-        target = canonical_angular_coordinate_system(coordinate_system)
-        if not str(coordinate_system or "").strip() or target not in {
-            "conic", "great_circle"
-        }:
-            raise ValueError("coordinate_system must be conic or great_circle")
-        if target == "great_circle":
-            gc_convention = str(gc_convention).strip().lower()
-            if gc_convention not in {LEGACY_PTM_GC_CONVENTION, GRIM_GC_CONVENTION}:
-                raise ValueError("unsupported great-circle convention")
-            roll_deg, tilt_deg = float(roll_deg), float(tilt_deg)
-            if not np.isfinite([roll_deg, tilt_deg]).all():
-                raise ValueError("great-circle roll and tilt must be finite")
-
-        source_system = self.angular_coordinate_system()
-        declaration = {
-            "schema": "grim.angular-coordinate-declaration.v1",
-            "source_system": source_system,
-            "source_gc_convention": (
-                self.great_circle_coordinate_convention()
-                if source_system == "great_circle" else None
-            ),
-            "source_orientation_deg": self.angular_frame_orientation_deg(),
-            "target_system": target,
-            "numeric_data_changed": False,
-        }
-
-
-        result = copy.deepcopy(self)
-        for container in (result.units, result.extra):
-            for key in (
-                "great_circle_coordinate_convention", "angular_roll_deg",
-                "angular_tilt_deg", "ptm_roll", "ptm_tilt", "ptm_cut_type",
-                "ptm_cut_type_source", "elevation_coordinate_convention",
-                "sentri_elevation_convention", "sentri_coordinate_mapping",
-                "assembly_angular_coordinate_contract",
-            ):
-                container.pop(key, None)
-            container["angular_coordinate_system"] = target
-        if target == "great_circle":
-            for container in (result.units, result.extra):
-                container["great_circle_coordinate_convention"] = gc_convention
-            result.units.update(angular_roll_deg=roll_deg, angular_tilt_deg=tilt_deg)
-            declaration.update(
-                gc_convention=gc_convention, roll_deg=roll_deg, tilt_deg=tilt_deg
-            )
-        for key in (
-            "solver_metadata_json", "production_mesh_certification_json",
-            "source_body_mesh_certification_json",
-        ):
-            result.extra.pop(key, None)
-        self._invalidate_assembly_sampling_hash(result.extra, "set-angular-coordinates")
-        result.extra["angular_coordinate_declaration_json"] = json.dumps(
-            declaration, sort_keys=True, separators=(",", ":")
-        )
-        label = "azimuth/elevation (conic)" if target == "conic" else (
-            f"aspect/pitch (great_circle; {gc_convention}; "
-            f"roll={roll_deg:g}, tilt={tilt_deg:g} deg)"
-        )
-        entry = (
-            f"User declared coordinates: {source_system} -> {label}; "
-            "numeric axes and samples unchanged; no coordinate conversion"
-        )
-        result.history = f"{self.history}\n{entry}" if self.history else entry
-        return result
-
-    def great_circle_coordinate_convention(self):
-        """Return the declared great-circle chart and polarization convention.
-
-        GRIM-created grids use ``grim_gc_v1``. Unmarked PTM inputs use
-        ``legacy_ptm_unspecified``.
-        """
-
-        raw = (self.units or {}).get("great_circle_coordinate_convention")
-        if raw is None or str(raw).strip() == "":
-            raw = (self.extra or {}).get(
-                "great_circle_coordinate_convention", ""
-            )
-        text = str(raw or "").strip().lower().replace("-", "_")
-        aliases = {
-            "": LEGACY_PTM_GC_CONVENTION,
-            "grim": GRIM_GC_CONVENTION,
-            "grim_gc": GRIM_GC_CONVENTION,
-            "legacy": LEGACY_PTM_GC_CONVENTION,
-            "unknown": LEGACY_PTM_GC_CONVENTION,
-            "unspecified": LEGACY_PTM_GC_CONVENTION,
-        }
-        return aliases.get(text, text)
+    """Wedge, SENTRi, and elevation-pair coordinate transforms."""
 
     def convert_wedge_to_conic(
         self,
@@ -345,22 +248,6 @@ class GridCoordinatesMixin:
         measured wedge tilts and a complete turntable revolution are required.
         """
         from GRIM_Backend.datasets.grid import RcsGrid
-
-        declared_source_system = self._declared_scalar_metadata(
-            "angular_coordinate_system"
-        )
-        source_system = self.angular_coordinate_system()
-        if source_system == "great_circle":
-            raise ValueError(
-                "Wedge-to-Conic requires turntable-angle/wedge-tilt axes, not "
-                "a great-circle dataset"
-            )
-        if declared_source_system and source_system != "wedge_turntable":
-            raise ValueError(
-                "Wedge-to-Conic cannot override an explicit non-wedge angular "
-                f"coordinate system {declared_source_system!r}"
-            )
-        assumed_wedge_axes = not bool(declared_source_system)
 
         az_unit = self._canonical_unit(
             (self.units or {}).get("azimuth"), _ANGLE_UNITS, "deg"
@@ -507,18 +394,17 @@ class GridCoordinatesMixin:
                 "wedge_to_conic_cross_pol_treatment": cross_note,
             }
         )
-        if assumed_wedge_axes:
-            converted_extra["wedge_axes_assumption_json"] = json.dumps(
-                {
-                    "schema": "grim.wedge-axes-assumption.v1",
-                    "operation_requested": True,
-                    "source_coordinate_declaration_missing": True,
-                    "assumed_axes": WEDGE_TURNTABLE_CONVENTION,
-                    "legacy_user_attested": bool(attest_wedge_axes),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+        converted_extra["wedge_axes_assumption_json"] = json.dumps(
+            {
+                "schema": "grim.wedge-axes-assumption.v1",
+                "operation_requested": True,
+                "source_coordinate_declaration_missing": True,
+                "assumed_axes": WEDGE_TURNTABLE_CONVENTION,
+                "legacy_user_attested": bool(attest_wedge_axes),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         geometric_supported = (
             (query_tau >= tau_sorted[0] - 1.0e-9)
             & (query_tau <= tau_sorted[-1] + 1.0e-9)
@@ -531,8 +417,7 @@ class GridCoordinatesMixin:
             f"Jones C^T*S*C rotation ({cross_note}); no extrapolation; "
             f"normal-grid geometric coverage {coverage:.1f}%"
         )
-        if assumed_wedge_axes:
-            history_entry += "; untagged source axes assumed from requested operation"
+        history_entry += "; source axes assumed from requested operation"
         history = (
             f"{self.history}\n{history_entry}" if self.history else history_entry
         )
@@ -542,196 +427,6 @@ class GridCoordinatesMixin:
             self.frequencies,
             self.polarizations,
             rcs=conic_channels,
-            rcs_domain=self.rcs_domain,
-            source_path=self.source_path,
-            history=history,
-            units=converted_units,
-            extra=converted_extra,
-        )
-
-    def convert_equatorial_conic_gc(
-        self,
-        direction,
-        *,
-        attest_legacy_ptm_convention=False,
-    ):
-        """Convert conic and great-circle tags for a zero-plane cut.
-
-        Sample coordinates and polarization values are preserved. Nonzero cuts and
-        incompatible declared conventions are rejected. An unmarked PTM input
-        records the GRIM aspect/basis convention as an operation assumption.
-        """
-        from GRIM_Backend.datasets.grid import RcsGrid
-
-        direction = str(direction or "").strip().lower()
-        if direction not in {"conic_to_gc", "gc_to_conic"}:
-            raise ValueError(
-                "direction must be 'conic_to_gc' or 'gc_to_conic'"
-            )
-        source_system = self.angular_coordinate_system()
-        expected_source = "conic" if direction == "conic_to_gc" else "great_circle"
-        if source_system not in {"conic", "great_circle"}:
-            raise ValueError(
-                "equatorial Conic/GC conversion does not support angular "
-                f"coordinate system {source_system!r}"
-            )
-        if source_system != expected_source:
-            arrow = "Conic→GC" if direction == "conic_to_gc" else "GC→Conic"
-            raise ValueError(
-                f"{arrow} requires a source tagged {expected_source}; got "
-                f"{source_system}"
-            )
-
-        az_unit = self._canonical_unit(
-            (self.units or {}).get("azimuth"), _ANGLE_UNITS, "deg"
-        )
-        el_unit = self._canonical_unit(
-            (self.units or {}).get("elevation"), _ANGLE_UNITS, "deg"
-        )
-        if az_unit not in {"deg", "rad"} or el_unit not in {"deg", "rad"}:
-            raise ValueError(
-                "equatorial Conic/GC conversion requires degree or radian "
-                f"angle axes; got azimuth={az_unit!r}, elevation={el_unit!r}"
-            )
-        azimuths = np.asarray(self.azimuths, dtype=float)
-        elevations = np.asarray(self.elevations, dtype=float)
-        if azimuths.size == 0 or not np.all(np.isfinite(azimuths)):
-            raise ValueError("equatorial Conic/GC conversion needs a finite aspect axis")
-        if elevations.size != 1 or not np.all(np.isfinite(elevations)):
-            raise ValueError("exact Conic/GC conversion requires exactly one finite cut")
-        elevation_deg = (
-            np.rad2deg(elevations) if el_unit == "rad" else elevations
-        )
-        if not np.isclose(elevation_deg[0], 0.0, rtol=0.0, atol=1.0e-7):
-            label = "elevation" if source_system == "conic" else "pitch"
-            raise ValueError(
-                f"exact Conic/GC conversion requires one 0 degree {label} cut"
-            )
-
-        roll, tilt = self.angular_frame_orientation_deg()
-        if not np.allclose((roll, tilt), (0.0, 0.0), rtol=0.0, atol=1.0e-7):
-            raise ValueError(
-                "exact Conic/GC conversion requires stored roll=tilt=0 "
-                f"degrees; got roll={roll:g}, tilt={tilt:g}"
-            )
-        polarizations = [
-            str(value).strip().upper() for value in self.polarizations
-        ]
-        unsupported = sorted(set(polarizations) - {"VV", "HH"})
-        if unsupported:
-            raise ValueError(
-                "exact Conic/GC conversion currently supports VV/HH only; "
-                "legacy PTM cross-polar basis signs are unspecified; got "
-                + ", ".join(unsupported)
-            )
-
-        if direction == "gc_to_conic":
-            convention = self.great_circle_coordinate_convention()
-            if convention != GRIM_GC_CONVENTION:
-                if convention != LEGACY_PTM_GC_CONVENTION:
-                    raise ValueError(
-                        "unsupported great-circle coordinate convention "
-                        f"{convention!r}; only GRIM_GC_V1 or an unmarked "
-                        "legacy PTM is supported"
-                    )
-                convention_note = "unmarked legacy PTM assumed GRIM_GC_V1"
-            else:
-                convention_note = "declared GRIM_GC_V1"
-        else:
-            convention_note = "created with GRIM_GC_V1"
-
-
-        period = 2.0 * np.pi if az_unit == "rad" else 360.0
-        half_period = 0.5 * period
-        wrapped = np.mod(azimuths + half_period, period) - half_period
-        wrapped[np.isclose(wrapped, 0.0, rtol=0.0, atol=1.0e-12)] = 0.0
-        order = np.argsort(wrapped, kind="stable")
-        wrapped = wrapped[order]
-        tolerance = np.deg2rad(1.0e-7) if az_unit == "rad" else 1.0e-7
-        if wrapped.size > 1 and np.any(np.diff(wrapped) <= tolerance):
-            raise ValueError(
-                "aspect axis contains duplicate or seam-alias directions after wrapping"
-            )
-
-        expected_shape = self.rcs_power.shape
-        converted_extra = {}
-        for key, value in self._extra_to_write().items():
-            array = np.asarray(value)
-            if array.ndim >= 4 and array.shape[:4] == expected_shape:
-                converted_extra[key] = np.array(array[order, ...], copy=True)
-            else:
-                converted_extra[key] = copy.deepcopy(value)
-
-
-        for key in (
-            "solver_metadata_json",
-            "production_mesh_certification_json",
-            "source_body_mesh_certification_json",
-        ):
-            converted_extra.pop(key, None)
-        self._drop_malformed_raw_metadata(converted_extra)
-        self._invalidate_assembly_sampling_hash(
-            converted_extra, "convert-equatorial-conic-great-circle"
-        )
-        converted_extra.pop("assembly_angular_coordinate_contract", None)
-        if (
-            direction == "gc_to_conic"
-            and self.great_circle_coordinate_convention()
-            == LEGACY_PTM_GC_CONVENTION
-        ):
-            converted_extra["great_circle_conversion_assumption_json"] = json.dumps(
-                {
-                    "schema": "grim.great-circle-conversion-assumption.v1",
-                    "operation_requested": True,
-                    "source_convention_unmarked": True,
-                    "assumed_convention": GRIM_GC_CONVENTION,
-                    "legacy_user_attested": bool(attest_legacy_ptm_convention),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-
-        converted_units = copy.deepcopy(self.units or {})
-        if direction == "conic_to_gc":
-            converted_units["angular_coordinate_system"] = "great_circle"
-            converted_units["great_circle_coordinate_convention"] = GRIM_GC_CONVENTION
-            converted_units["angular_roll_deg"] = 0.0
-            converted_units["angular_tilt_deg"] = 0.0
-            converted_extra["angular_coordinate_system"] = "great_circle"
-            converted_extra["great_circle_coordinate_convention"] = GRIM_GC_CONVENTION
-        else:
-            converted_units["angular_coordinate_system"] = "conic"
-            for key in (
-                "great_circle_coordinate_convention",
-                "angular_roll_deg",
-                "angular_tilt_deg",
-            ):
-                converted_units.pop(key, None)
-            for key in (
-                "angular_coordinate_system",
-                "great_circle_coordinate_convention",
-                "ptm_cut_type",
-                "ptm_roll",
-                "ptm_tilt",
-            ):
-                converted_extra.pop(key, None)
-
-        arrow = "Conic->GC" if direction == "conic_to_gc" else "GC->Conic"
-        history_entry = (
-            f"{arrow} exact equatorial relabel; no interpolation; "
-            f"{convention_note}; VV/HH only"
-        )
-        history = (
-            f"{self.history}\n{history_entry}" if self.history else history_entry
-        )
-        return RcsGrid(
-            wrapped,
-            np.asarray([0.0], dtype=self.elevations.dtype),
-            self.frequencies,
-            self.polarizations,
-            rcs=None,
-            rcs_power=np.asarray(self.rcs_power)[order, ...],
-            rcs_phase=np.asarray(self.rcs_phase)[order, ...],
             rcs_domain=self.rcs_domain,
             source_path=self.source_path,
             history=history,
