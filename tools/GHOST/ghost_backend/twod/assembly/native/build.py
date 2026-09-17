@@ -1,4 +1,4 @@
-"""Build the optional table evaluator with a C99 compiler on Windows or Linux."""
+"""Build the optional table evaluator and far-block quadrature with a C99 compiler."""
 import os
 from pathlib import Path
 import subprocess
@@ -7,10 +7,14 @@ import shutil
 
 def build():
     root = Path(__file__).resolve().parent
-    output = root / ('ghost_table.dll' if os.name == 'nt' else 'libghost_table.so')
+    return [build_one(root, name) for name in ('table', 'far')]
+
+
+def build_one(root, name):
+    output = root / ('ghost_{}.dll'.format(name) if os.name == 'nt' else 'libghost_{}.so'.format(name))
     compiler = os.environ.get('CC', 'gcc')
     # No fast-math: preserve the validated double-precision interpolation.
-    flags = ['-O3', '-std=c99', '-shared']
+    flags = ['-O3', '-std=c99', '-ffp-contract=off', '-shared']
     flags += ['-static-libgcc'] if os.name == 'nt' else ['-fPIC']
     resolved = shutil.which(compiler)
     if resolved is None:
@@ -23,7 +27,7 @@ def build():
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = 0
-    subprocess.run([resolved, *flags, str(root/'table.c'), '-o', str(output)],
+    subprocess.run([resolved, *flags, str(root/(name + '.c')), '-o', str(output)],
                    env=env, startupinfo=startup, check=True)
     return output
 

@@ -21,6 +21,31 @@ class AssemblyGeometry:
         for array in (self.centers, self.lengths, self.node_ids, self.p0, self.segments, self.normals):
             array.flags.writeable = False
 
+    def elements_touching(self, *node_sets):
+        """Element mask of every element with a node in any of the node-id sets.
+
+        A node-to-element incidence built once makes this proportional to the
+        query, not to the mesh, for repeated compressed tile queries.
+        """
+        if not hasattr(self, '_incidence'):
+            flat = self.node_ids.reshape(-1)
+            order = np.argsort(flat, kind='stable')
+            counts = np.bincount(flat, minlength=len(self.mesh.nodes))
+            self._incidence = (np.r_[0, np.cumsum(counts)], order // max(1, self.node_ids.shape[1]))
+        starts, elements = self._incidence
+        mask = np.zeros(len(self.elements), bool)
+        for ids in node_sets:
+            ids = np.asarray(ids, dtype=np.int64)
+            if not len(ids):
+                continue
+            lo, hi = starts[ids], starts[ids + 1]
+            lengths = hi - lo
+            total = int(lengths.sum())
+            if total:
+                positions = np.repeat(lo - np.r_[0, np.cumsum(lengths)[:-1]], lengths) + np.arange(total)
+                mask[elements[positions]] = True
+        return mask
+
     def validate(self, mesh):
         if mesh is not self.mesh or len(mesh.elements) != len(self.elements):
             raise ValueError('Prepared assembly geometry belongs to another mesh.')

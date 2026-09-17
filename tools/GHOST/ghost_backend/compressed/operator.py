@@ -1,12 +1,18 @@
 """One-pass tile assembly and compressed operator storage."""
 import collections
 import contextvars
+import os
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from ghost_backend.twod.assembly.compact import CompactOperator
 import scipy.linalg as la
 from ghost_backend.linalg.sweep import _qr_basis
 from ghost_backend.linalg.hierarchical import spatial_order
+
+# Multi-column tile products run per output group on a few threads; more would
+# oversubscribe the BLAS threads that solves already widen.
+MATMUL_WORKERS=min(4,os.cpu_count() or 1)
+MATMUL_THREADED_COLUMNS=8
 
 
 def tile_payload(raw, tail, tolerance, method, probe=True):
@@ -197,13 +203,30 @@ class StreamedOperator:
             yield self.groups[i],self.groups[j],left if right is None else left@right
 
     def equilibrate(self):
-        """One tile pass; row maxima were accumulated during final assembly."""
+        """One tile pass; row maxima were accumulated during final assembly.
+
+        Column groups run on threads and sum their tiles in the serial order.
+        """
+        self.iter_tiles().close()  # spooled operators must be loaded first
         row=np.where(self.row_max>0,self.row_max,1.)
         column=np.zeros(self.n);sums=np.zeros(self.n)
-        for rr,cc,value in self.iter_tiles():
-            magnitude=abs(value)/row[rr,None]
-            column[cc]=np.maximum(column[cc],np.max(magnitude,axis=0))
-            sums[cc]+=np.sum(magnitude,axis=0)
+        by_column={}
+        for i,j in self.tiles:by_column.setdefault(j,[]).append(i)
+        def group(j):
+            cols=self.groups[j];largest=np.zeros(len(cols));total=np.zeros(len(cols))
+            for i in by_column[j]:
+                self.checkpoint()
+                left,right=self.tiles[i,j]
+                magnitude=abs(left if right is None else left@right)/row[self.groups[i],None]
+                largest=np.maximum(largest,np.max(magnitude,axis=0))
+                total+=np.sum(magnitude,axis=0)
+            return cols,largest,total
+        with ThreadPoolExecutor(max_workers=MATMUL_WORKERS,thread_name_prefix='ghost-equilibrate') as pool:
+            futures=[pool.submit(contextvars.copy_context().run,group,j) for j in by_column]
+            for future in futures:
+                cols,largest,total=future.result()
+                column[cols]=np.maximum(column[cols],largest)
+                sums[cols]+=total
         column=np.where(column>0,column,1.)
         return row,column,float(np.max(sums/column))
 
@@ -260,12 +283,33 @@ class StreamedOperator:
         if b.ndim!=2 or b.shape[0]!=self.n or not b.shape[1] or not np.all(np.isfinite(b)):
             raise ValueError('Invalid operator RHS.')
         result=np.zeros_like(b,dtype=complex)
-        for (i,j),(left,right) in self.tiles.items():
-            self.checkpoint()
-            rows,cols=self.groups[i],self.groups[j]
-            if trans==0:
-                result[rows]+=left@b[cols] if right is None else left@(right@b[cols])
-            else:
-                def adj(a):return a.T if trans==1 else a.conj().T
-                result[cols]+=adj(left)@b[rows] if right is None else adj(right)@(adj(left)@b[rows])
+        def adj(a):return a.T if trans==1 else a.conj().T
+        if b.shape[1]<MATMUL_THREADED_COLUMNS or MATMUL_WORKERS<2:
+            for (i,j),(left,right) in self.tiles.items():
+                self.checkpoint()
+                rows,cols=self.groups[i],self.groups[j]
+                if trans==0:
+                    result[rows]+=left@b[cols] if right is None else left@(right@b[cols])
+                else:
+                    result[cols]+=adj(left)@b[rows] if right is None else adj(right)@(adj(left)@b[rows])
+            return result[:,0] if vector else result
+        # Each output group sums its tiles in the serial order, so results are identical.
+        outputs={}
+        for i,j in self.tiles:outputs.setdefault(i if trans==0 else j,[]).append((i,j))
+        def group(keys):
+            first=keys[0][0] if trans==0 else keys[0][1]
+            value=np.zeros((len(self.groups[first]),b.shape[1]),complex)
+            for i,j in keys:
+                self.checkpoint()
+                left,right=self.tiles[i,j]
+                if trans==0:
+                    value+=left@b[self.groups[j]] if right is None else left@(right@b[self.groups[j]])
+                else:
+                    value+=adj(left)@b[self.groups[i]] if right is None else adj(right)@(adj(left)@b[self.groups[i]])
+            return first,value
+        with ThreadPoolExecutor(max_workers=MATMUL_WORKERS,thread_name_prefix='ghost-matmul') as pool:
+            futures=[pool.submit(contextvars.copy_context().run,group,keys) for keys in outputs.values()]
+            for future in futures:
+                index,value=future.result()
+                result[self.groups[index]]+=value
         return result[:,0] if vector else result

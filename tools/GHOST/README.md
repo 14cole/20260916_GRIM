@@ -64,6 +64,14 @@ The [phase and quadrature guidance](SOLVER_PHASE_AND_QUADRATURE.md) describes co
 checks. Read the phase-compatibility notes before combining legacy complex
 exports with newly generated results.
 
+2-D assembly ships two optional native libraries in
+`ghost_backend/twod/assembly/native/`: the kernel-table evaluator and the
+far-field block quadrature and scatter. Both match the NumPy path bit for bit
+wherever the kernel table covers the distance, and are skipped when they cannot
+load. After editing `table.c` or `far.c`, set `CC` to the MSYS2 UCRT64 compiler
+(for example `C:\msys64\ucrt64\bin\gcc.exe`) and run
+`py ghost_backend/twod/assembly/native/build.py`.
+
 Build the native BoR sampler on the worker machine with:
 
 ```powershell

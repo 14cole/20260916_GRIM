@@ -1,7 +1,6 @@
 """Checked inverse of a compressed operator, including adjoint evidence."""
-import inspect
 import numpy as np
-from scipy.sparse.linalg import LinearOperator,gmres,onenormest
+from scipy.sparse.linalg import LinearOperator,onenormest
 from ghost_backend.compressed.inverse import CompressedSystem
 from ghost_backend.linalg.hierarchical import HierarchicalRejected
 from ghost_backend.execution.metrics import timed_stage
@@ -13,6 +12,13 @@ SOLVE_BACKWARD_ERROR_LIMIT=1e-12
 # the gate can pass by at most ~1e-3; larger estimates are not accepted at it.
 CONDITION_PROBE_BACKWARD_ERROR_LIMIT=1e-9
 CONDITION_PROBE_ACCEPTED_PERTURBATION=1e-2
+# Stalled refinements finish with GMRES on up to GMRES_BATCH columns at once, so
+# each iteration shares one multi-column operator product and preconditioner solve.
+GMRES_BATCH=16
+GMRES_RESTART=20
+GMRES_ITERATION_CAP=120
+# Refinement and GMRES both stop at this normwise backward error against the tile operator.
+REFINEMENT_BACKWARD_ERROR=3e-15
 
 
 class CompressedFactor:
@@ -65,15 +71,18 @@ class CompressedFactor:
         from ghost_backend.twod.constants import EPS
         return np.linalg.norm(error,axis=0)/np.where(norm<=EPS,1.,norm)
 
+    def _backward_errors(self,x,b,residual,trans):
+        norm=float(np.max(self.a.row_norm if trans==0 else self.a.column_norm))
+        denominator=np.maximum(norm*np.max(abs(x),axis=0)+np.max(abs(b),axis=0),1e-300)
+        return np.max(abs(residual),axis=0)/denominator,denominator
+
     def _refine(self,b,trans):
         x=self.factor.apply(b,solve=True,trans=trans)
-        norm=float(np.max(self.a.row_norm if trans==0 else self.a.column_norm))
         previous=np.inf
         for step in range(10):
             self.checkpoint();residual=b-self.a.matmul(x,trans)
-            denominator=np.maximum(norm*np.max(abs(x),axis=0)+np.max(abs(b),axis=0),1e-300)
-            errors=np.max(abs(residual),axis=0)/denominator
-            bad=~np.isfinite(errors)|(errors>3e-15)
+            errors,_=self._backward_errors(x,b,residual,trans)
+            bad=~np.isfinite(errors)|(errors>REFINEMENT_BACKWARD_ERROR)
             if not np.any(bad):
                 self.event['max_refinements']=max(self.event['max_refinements'],step)
                 return x,-residual
@@ -82,22 +91,65 @@ class CompressedFactor:
             previous=worst;x[:,bad]+=self.factor.apply(residual[:,bad],solve=True,trans=trans)
             self.event['refinement_steps']+=1
         self.event['gmres_columns']+=int(np.sum(bad))
-        action=LinearOperator(self.a.shape,matvec=lambda z:self.a.matmul(z,trans),dtype=complex)
-        inverse=LinearOperator(self.a.shape,matvec=lambda z:self.factor.apply(z,solve=True,trans=trans),dtype=complex)
-        parameters=inspect.signature(gmres).parameters
-        modern='rtol' in parameters
-        for j in np.flatnonzero(bad):
-            iterations=[0]
-            def callback(value):
-                self.checkpoint();iterations[0]+=1
-                if iterations[0]>120:raise HierarchicalRejected('Compressed GMRES iteration cap exceeded.')
-            params=dict(x0=x[:,j],M=inverse,restart=30,maxiter=4 if modern else 120,callback=callback)
-            params.update(dict(rtol=1e-13,atol=0.,callback_type='pr_norm') if modern else dict(tol=1e-13))
-            if 'atol' in parameters:params['atol']=0.
-            if 'callback_type' in parameters:params.update(callback_type='pr_norm',maxiter=4)
-            x[:,j],info=gmres(action,b[:,j],**params)
-            if info:raise HierarchicalRejected('Compressed GMRES did not converge within its cap.')
+        columns=np.flatnonzero(bad)
+        for start in range(0,len(columns),GMRES_BATCH):
+            chunk=columns[start:start+GMRES_BATCH]
+            x[:,chunk]=self._gmres(b[:,chunk],x[:,chunk],trans)
         return x,self.a.matmul(x,trans)-b
+
+    def _gmres(self,b,x,trans):
+        """Right-preconditioned restarted GMRES, independent per column, batched products.
+
+        Columns stop at the refinement backward error; the batch shares
+        GMRES_ITERATION_CAP, and a restart cycle that does not halve the worst error
+        rejects the preconditioner. Callers still check the physical backward error.
+        """
+        n,count=b.shape
+        x=np.array(x,complex,copy=True);iterations=0;previous=np.inf
+        while True:
+            self.checkpoint()
+            residual=b-self.a.matmul(x,trans)
+            errors,denominator=self._backward_errors(x,b,residual,trans)
+            active=np.flatnonzero(~np.isfinite(errors)|(errors>REFINEMENT_BACKWARD_ERROR))
+            if not len(active):return x
+            worst=float(np.max(errors))
+            if iterations>=GMRES_ITERATION_CAP or not np.isfinite(worst) or worst>previous/2:
+                raise HierarchicalRejected('Compressed GMRES did not converge within its cap.')
+            previous=worst
+            beta=np.linalg.norm(residual[:,active],axis=0)
+            c,m=len(active),min(GMRES_RESTART,GMRES_ITERATION_CAP-iterations)
+            basis=np.empty((n,c,m+1),complex);basis[:,:,0]=residual[:,active]/beta
+            hessenberg=np.zeros((c,m+1,m),complex)
+            cosines=np.zeros((c,m),complex);sines=np.zeros((c,m),complex)
+            rhs=np.zeros((c,m+1),complex);rhs[:,0]=beta
+            steps=0
+            for j in range(m):
+                self.checkpoint()
+                w=self.a.matmul(self.factor.apply(basis[:,:,j],solve=True,trans=trans),trans)
+                for _ in range(2):
+                    h=np.einsum('ncj,nc->cj',basis[:,:,:j+1].conj(),w)
+                    w-=np.einsum('ncj,cj->nc',basis[:,:,:j+1],h)
+                    hessenberg[:,:j+1,j]+=h
+                size=np.linalg.norm(w,axis=0)
+                breakdown=size<=1e-14*np.linalg.norm(hessenberg[:,:j+1,j],axis=1)
+                hessenberg[:,j+1,j]=size
+                basis[:,:,j+1]=w/np.where(size>0,size,1.)
+                for i in range(j):
+                    top=cosines[:,i]*hessenberg[:,i,j]+sines[:,i]*hessenberg[:,i+1,j]
+                    hessenberg[:,i+1,j]=-sines[:,i].conj()*hessenberg[:,i,j]+cosines[:,i].conj()*hessenberg[:,i+1,j]
+                    hessenberg[:,i,j]=top
+                first,second=hessenberg[:,j,j],hessenberg[:,j+1,j]
+                length=np.sqrt(abs(first)**2+abs(second)**2);length=np.where(length>0,length,1.)
+                cosines[:,j],sines[:,j]=first.conj()/length,second.conj()/length
+                hessenberg[:,j,j],hessenberg[:,j+1,j]=length,0
+                rhs[:,j+1]=-sines[:,j].conj()*rhs[:,j]
+                rhs[:,j]=cosines[:,j]*rhs[:,j]
+                steps=j+1;iterations+=1
+                # The 2-norm residual estimate bounds the max-norm backward error. Stop
+                # there, or at a breakdown: every column's triangle is nonsingular now.
+                if np.all(abs(rhs[:,j+1])<=REFINEMENT_BACKWARD_ERROR*denominator[active]/4) or np.any(breakdown):break
+            y=np.linalg.solve(hessenberg[:,:steps,:steps],rhs[:,:steps,None])[...,0]
+            x[:,active]+=self.factor.apply(np.einsum('ncj,cj->nc',basis[:,:,:steps],y),solve=True,trans=trans)
 
     def inverse(self,rhs,trans=0,return_residual=False,limit=SOLVE_BACKWARD_ERROR_LIMIT):
         if trans not in (0,1,2):raise ValueError('Invalid transpose mode.')
@@ -126,9 +178,12 @@ class CompressedFactor:
     def _condition(self):
         rows,columns,norm=self.a.equilibrate()
         probe=CONDITION_PROBE_BACKWARD_ERROR_LIMIT
+        # onenormest applies both probe columns at once; one checked solve serves them.
         inverse=LinearOperator(self.a.shape,
             matvec=lambda z:columns*self.inverse(rows*np.asarray(z).reshape(-1),limit=probe),
-            rmatvec=lambda z:rows*self.inverse(columns*np.asarray(z).reshape(-1),trans=2,limit=probe),dtype=complex)
+            rmatvec=lambda z:rows*self.inverse(columns*np.asarray(z).reshape(-1),trans=2,limit=probe),
+            matmat=lambda z:columns[:,None]*self.inverse(rows[:,None]*np.asarray(z),limit=probe),
+            rmatmat=lambda z:rows[:,None]*self.inverse(columns[:,None]*np.asarray(z),trans=2,limit=probe),dtype=complex)
         estimate=norm*float(onenormest(inverse))
         if not np.isfinite(estimate):raise HierarchicalRejected('Nonfinite compressed condition estimate.')
         if estimate*probe>CONDITION_PROBE_ACCEPTED_PERTURBATION and self.event.get('max_probe_backward_error',0.)>SOLVE_BACKWARD_ERROR_LIMIT:

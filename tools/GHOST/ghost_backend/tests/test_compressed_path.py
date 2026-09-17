@@ -108,6 +108,19 @@ class CompressedPathTests(unittest.TestCase):
         np.testing.assert_allclose(actual,np.linalg.solve(a,np.arange(1,17)),rtol=1e-11,atol=1e-12)
         self.assertGreater(factor.event['gmres_columns'],0)
 
+    def test_batched_gmres_solves_many_columns_and_adjoints(self):
+        import ghost_backend.compressed.factor as compressed_factor
+        rng=np.random.RandomState(8);n=120
+        a=np.eye(n)*3+(rng.randn(n,n)+1j*rng.randn(n,n))/np.sqrt(n)
+        factor=CompressedFactor(StreamedOperator(Exact(a),np.arange(n)[:,None],tile=32))
+        b=rng.randn(n,21)+1j*rng.randn(n,21)
+        with mock.patch.object(factor.factor,'apply',side_effect=lambda v,**kw:v.copy()),                mock.patch.object(compressed_factor,'GMRES_BATCH',8):
+            for trans,matrix in ((0,a),(1,a.T),(2,a.conj().T)):
+                np.testing.assert_allclose(factor.inverse(b,trans),np.linalg.solve(matrix,b),rtol=1e-11,atol=1e-12)
+        self.assertEqual(factor.event['gmres_columns'],63)
+        with mock.patch.object(factor.factor,'apply',side_effect=lambda v,**kw:0*v),                self.assertRaises(HierarchicalRejected):
+            factor._gmres(b,np.zeros_like(b),0)
+
     def test_public_mesh_certificate_and_no_global_dense_factor(self):
         value=fixture('pec',64)
         with mock.patch('ghost_backend.linalg.dense.DenseFactor.__init__',side_effect=AssertionError('dense factor')):

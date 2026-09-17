@@ -44,6 +44,47 @@ class SolverEfficiencyTests(unittest.TestCase):
             SystemScatter(actual,nodes,np.arange(nodes),np.arange(nodes),routes).scatter_add(rows[:,None],columns[None,:],values)
             np.testing.assert_allclose(actual,expected,rtol=1e-14,atol=1e-14)
 
+    def test_native_far_blocks_match_numpy_far_pass(self):
+        from ghost_backend.twod.assembly.native import far
+        if far.library() is None:
+            self.skipTest('native far-block library unavailable')
+        calls=[];original=far.far_block
+        def counted(*args,**kwargs):
+            result=original(*args,**kwargs);calls.append(result is not None);return result
+        for kind in ('pec','mixed'):
+            mesh,_,k=prepared(kind,'TE',40)
+            n=len(mesh.nodes);rows,cols=np.arange(n)[::3],np.arange(n)[1::2]
+            for wavenumber,exact in ((k,True),(k-3j,True),(30-4000j,False)):
+                results=[]
+                for native in (False,True):
+                    with mock.patch.object(ops,'_NATIVE_FAR',native),mock.patch.object(far,'far_block',counted),\
+                            execution._STATE.override(execution.CPUState()):
+                        full=ops._assemble_linear_operator_matrices_multi(mesh,wavenumber,True,[None])[0]
+                        compact=ops._assemble_linear_operator_matrices_multi(mesh,wavenumber,False,
+                            [None,np.arange(len(mesh.elements))%2==0],output_node_ids_many=[(rows,cols),(cols,rows)])
+                    results.append([np.array(full[0]),np.array(full[1])]+[np.array(o.values) for pair in compact for o in pair])
+                for reference,actual in zip(*results):
+                    if exact:
+                        np.testing.assert_array_equal(actual,reference)
+                    else:
+                        # Beyond a partial table the Hankel expansion replaces exact
+                        # kernels that have decayed below exp(-128).
+                        np.testing.assert_allclose(actual,reference,rtol=1e-13,atol=1e-60)
+        self.assertTrue(calls and all(calls))
+
+    def test_native_far_block_extends_partial_tables_asymptotically(self):
+        from ghost_backend.twod.assembly.native import far
+        if far.library() is None:
+            self.skipTest('native far-block library unavailable')
+        k=30-400j;table=kernels.KernelTable(k,128/400,degree=16)
+        distances=np.geomspace(.33,1.5,17)
+        source=np.stack([distances,np.zeros_like(distances)],axis=-1)[:,None,:]
+        s,d,_=far.far_block(table,k,np.zeros((1,1,2)),source,np.ones(1),np.ones((1,1)),np.array([[0.,1.]]),
+                             np.tile([1.,0.],(len(distances),1)),np.ones((1,len(distances))),False,True,True,False)
+        reference=kernels.values(k,distances)
+        np.testing.assert_allclose(s[0,0],reference[:,0],rtol=1e-13,atol=0)
+        np.testing.assert_allclose(d[0,0],-reference[:,1],rtol=1e-13,atol=0)
+
     def test_real_wavenumber_far_kernels_use_validated_table(self):
         mesh,_,_=prepared('pec','TE',20)
         state=execution.CPUState();k=37.

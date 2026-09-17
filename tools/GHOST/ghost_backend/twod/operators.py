@@ -6,7 +6,7 @@ import math
 import os
 import threading
 import numpy as np
-from ghost_backend.twod.assembly.compact import CompactOperator, scatter_operator_add
+from ghost_backend.twod.assembly.compact import CompactOperator, scatter_basis_columns, scatter_operator_add
 from ghost_backend.linalg.workspace import first_nonfinite
 from ghost_backend.twod.assembly.separation import requires_adaptive, close_pairs, segment_distance
 
@@ -1148,6 +1148,7 @@ _FAR_ORDER_TABLE = (
 )
 
 _FAR_GRADED = _env_positive_int("GHOST_FAR_GRADED", 1) != 0
+_NATIVE_FAR = True
 
 
 def set_far_quadrature_grading(enabled: 'bool') -> 'None':
@@ -1494,6 +1495,9 @@ def _assemble_linear_operator_matrices_multi(
         from ghost_backend.twod.assembly.kernels import select_far_kernels
         far_green, far_hankel = select_far_kernels(mesh, k0, far_green, far_hankel,
             domain_upper=None if prepared_geometry is None else prepared_geometry.domain_upper)
+    # Validated kernel tables let the native block quadrature replace the numpy far loop.
+    far_table = getattr(far_green, 'table', None)
+    native_far = _NATIVE_FAR and far_table is not None
 
     width = mesh_degree(mesh) + 1
     nnodes = len(mesh.nodes)
@@ -1610,6 +1614,10 @@ def _assemble_linear_operator_matrices_multi(
     obs_masks = [np.ones(nelems, dtype=bool) for _ in range(n_masks)]
     if output_node_ids_many is not None:
         for mi in range(n_masks):
+            if prepared_geometry is not None:
+                obs_masks[mi] = prepared_geometry.elements_touching(s_mats[mi].row_ids, k_mats[mi].row_ids)
+                src_masks[mi] = src_masks[mi] & prepared_geometry.elements_touching(s_mats[mi].column_ids, k_mats[mi].column_ids)
+                continue
             obs_masks[mi] = np.any((s_mats[mi].row_map[node_ids] >= 0) | (k_mats[mi].row_map[node_ids] >= 0), axis=1)
             src_masks[mi] = src_masks[mi] & np.any((s_mats[mi].column_map[node_ids] >= 0) | (k_mats[mi].column_map[node_ids] >= 0), axis=1)
         active = [mi for mi in active if np.any(src_masks[mi]) and np.any(obs_masks[mi])]
@@ -1775,125 +1783,134 @@ def _assemble_linear_operator_matrices_multi(
             src_p0 = p0_arr[src_global]
             src_seg = seg_arr[src_global]
             src_pts = src_p0[:, None, :] + t_src_f[None, :, None] * src_seg[:, None, :]
-            acc_s = (
-                [np.zeros((mb, nb), dtype=np.complex128) for _ in range(width**2)]
-                if want_s else None
-            )
-            acc_k = (
-                [np.zeros((mb, nb), dtype=np.complex128) for _ in range(width**2)]
-                if want_k else None
-            )
-            acc_kt = (
-                [np.zeros((mb, nb), dtype=np.complex128) for _ in range(width**2)]
-                if (want_k and mirrored) else None
-            )
-            # One partial sum per source basis function. The coefficient
-            # w*phi_o[a]*phi_s[b] is separable, so the source-quadrature loop
-            # can accumulate phi_s[b] alone and pay the phi_o[a] fold-in once
-            # per observation node instead of once per quadrature pair. That
-            # turns width**2 accumulations per pair into width.
-            part_s = (
-                [np.empty((mb, nb), dtype=np.complex128) for _ in range(width)]
-                if want_s else None
-            )
-            part_k = (
-                [np.empty((mb, nb), dtype=np.complex128) for _ in range(width)]
-                if want_k else None
-            )
-            part_kt = (
-                [np.empty((mb, nb), dtype=np.complex128) for _ in range(width)]
-                if (want_k and mirrored) else None
-            )
-            g_buf = np.empty((mb, nb), dtype=np.complex128) if want_s else None
-            h1_buf = np.empty((mb, nb), dtype=np.complex128) if want_k else None
-            dk_buf = np.empty((mb, nb), dtype=np.complex128) if want_k else None
-            cscratch = np.empty((mb, nb), dtype=np.complex128)
-            dx = np.empty((mb, nb), dtype=float)
-            dy = np.empty((mb, nb), dtype=float)
-            dist = np.empty((mb, nb), dtype=float)
-            krbuf = np.empty((mb, nb), dtype=float)
-            work = np.empty((mb, nb), dtype=float)
-            proj = np.empty((mb, nb), dtype=float) if want_k else None
-
-
-            if obs_normal_deriv:
-                n_ij = (obs_norm[:, 0][:, None], obs_norm[:, 1][:, None])
-                n_ji = (src_norm[None, :, 0], src_norm[None, :, 1])
+            native = None
+            if native_far:
+                from ghost_backend.twod.assembly.native.far import far_block
+                native = far_block(far_table, k0, obs_pts, src_pts, qw_obs, phi_obs_arr,
+                                   obs_norm, src_norm, any_far, obs_normal_deriv,
+                                   want_s, want_k, mirrored)
+            if native is not None:
+                acc_s, acc_k, acc_kt = native
             else:
-                n_ij = (src_norm[None, :, 0], src_norm[None, :, 1])
-                n_ji = (obs_norm[:, 0][:, None], obs_norm[:, 1][:, None])
+                acc_s = (
+                    np.zeros((width**2, mb, nb), dtype=np.complex128)
+                    if want_s else None
+                )
+                acc_k = (
+                    np.zeros((width**2, mb, nb), dtype=np.complex128)
+                    if want_k else None
+                )
+                acc_kt = (
+                    np.zeros((width**2, mb, nb), dtype=np.complex128)
+                    if (want_k and mirrored) else None
+                )
+                # One partial sum per source basis function. The coefficient
+                # w*phi_o[a]*phi_s[b] is separable, so the source-quadrature loop
+                # can accumulate phi_s[b] alone and pay the phi_o[a] fold-in once
+                # per observation node instead of once per quadrature pair. That
+                # turns width**2 accumulations per pair into width.
+                part_s = (
+                    [np.empty((mb, nb), dtype=np.complex128) for _ in range(width)]
+                    if want_s else None
+                )
+                part_k = (
+                    [np.empty((mb, nb), dtype=np.complex128) for _ in range(width)]
+                    if want_k else None
+                )
+                part_kt = (
+                    [np.empty((mb, nb), dtype=np.complex128) for _ in range(width)]
+                    if (want_k and mirrored) else None
+                )
+                g_buf = np.empty((mb, nb), dtype=np.complex128) if want_s else None
+                h1_buf = np.empty((mb, nb), dtype=np.complex128) if want_k else None
+                dk_buf = np.empty((mb, nb), dtype=np.complex128) if want_k else None
+                cscratch = np.empty((mb, nb), dtype=np.complex128)
+                dx = np.empty((mb, nb), dtype=float)
+                dy = np.empty((mb, nb), dtype=float)
+                dist = np.empty((mb, nb), dtype=float)
+                krbuf = np.empty((mb, nb), dtype=float)
+                work = np.empty((mb, nb), dtype=float)
+                proj = np.empty((mb, nb), dtype=float) if want_k else None
 
-            for qi in range(t_obs_f.size):
-                r_obs = obs_pts[:, qi, :]
-                w_obs_qi = float(qw_obs[qi])
-                phi_o = phi_obs_arr[qi]
 
-                for qj in range(t_src_f.size):
-                    r_src = src_pts[:, qj, :]
-                    w_src_qj = float(qw_src[qj])
-                    phi_s = phi_src_arr[qj]
+                if obs_normal_deriv:
+                    n_ij = (obs_norm[:, 0][:, None], obs_norm[:, 1][:, None])
+                    n_ji = (src_norm[None, :, 0], src_norm[None, :, 1])
+                else:
+                    n_ij = (src_norm[None, :, 0], src_norm[None, :, 1])
+                    n_ji = (obs_norm[:, 0][:, None], obs_norm[:, 1][:, None])
 
-                    np.subtract(r_obs[:, 0][:, None], r_src[None, :, 0], out=dx)
-                    np.subtract(r_obs[:, 1][:, None], r_src[None, :, 1], out=dy)
-                    np.multiply(dx, dx, out=dist)
-                    np.multiply(dy, dy, out=work)
-                    np.add(dist, work, out=dist)
-                    np.sqrt(dist, out=dist)
-                    np.maximum(dist, EPS, out=dist)
-                    if real_k:
-                        _far_kernel_argument(k0, dist, krbuf)
+                for qi in range(t_obs_f.size):
+                    r_obs = obs_pts[:, qi, :]
+                    w_obs_qi = float(qw_obs[qi])
+                    phi_o = phi_obs_arr[qi]
 
-                    if want_s and want_k and hasattr(far_green, 'pair'):
-                        far_green.pair(k0, real_k, dist, krbuf, work, g_buf, h1_buf)
-                    else:
-                        if want_s:
-                            far_green(k0, real_k, dist, krbuf, work, g_buf)
+                    for qj in range(t_src_f.size):
+                        r_src = src_pts[:, qj, :]
+                        w_src_qj = float(qw_src[qj])
+                        phi_s = phi_src_arr[qj]
+
+                        np.subtract(r_obs[:, 0][:, None], r_src[None, :, 0], out=dx)
+                        np.subtract(r_obs[:, 1][:, None], r_src[None, :, 1], out=dy)
+                        np.multiply(dx, dx, out=dist)
+                        np.multiply(dy, dy, out=work)
+                        np.add(dist, work, out=dist)
+                        np.sqrt(dist, out=dist)
+                        np.maximum(dist, EPS, out=dist)
+                        if real_k:
+                            _far_kernel_argument(k0, dist, krbuf)
+
+                        if want_s and want_k and hasattr(far_green, 'pair'):
+                            far_green.pair(k0, real_k, dist, krbuf, work, g_buf, h1_buf)
+                        else:
+                            if want_s:
+                                far_green(k0, real_k, dist, krbuf, work, g_buf)
+                            if want_k:
+                                far_hankel(k0, real_k, dist, krbuf, work, h1_buf)
+
                         if want_k:
-                            far_hankel(k0, real_k, dist, krbuf, work, h1_buf)
+                            np.multiply(dx, n_ij[0], out=proj)
+                            np.multiply(dy, n_ij[1], out=work)
+                            np.add(proj, work, out=proj)
+                            np.divide(proj, dist, out=proj)
+                            np.multiply(h1_buf, proj, out=dk_buf)
+                            if dgreen_sign < 0.0:
+                                np.negative(dk_buf, out=dk_buf)
+                        for b in range(width):
+                            coeff_b = w_src_qj * float(phi_s[b])
+                            if part_s is not None:
+                                _accumulate_first(part_s[b], g_buf, coeff_b, qj, cscratch)
+                            if part_k is not None:
+                                _accumulate_first(part_k[b], dk_buf, coeff_b, qj, cscratch)
 
-                    if want_k:
-                        np.multiply(dx, n_ij[0], out=proj)
-                        np.multiply(dy, n_ij[1], out=work)
-                        np.add(proj, work, out=proj)
-                        np.divide(proj, dist, out=proj)
-                        np.multiply(h1_buf, proj, out=dk_buf)
-                        if dgreen_sign < 0.0:
-                            np.negative(dk_buf, out=dk_buf)
-                    for b in range(width):
-                        coeff_b = w_src_qj * float(phi_s[b])
-                        if part_s is not None:
-                            _accumulate_first(part_s[b], g_buf, coeff_b, qj, cscratch)
-                        if part_k is not None:
-                            _accumulate_first(part_k[b], dk_buf, coeff_b, qj, cscratch)
+                        if acc_kt is not None:
 
+
+                            np.multiply(dx, n_ji[0], out=proj)
+                            np.multiply(dy, n_ji[1], out=work)
+                            np.add(proj, work, out=proj)
+                            np.divide(proj, dist, out=proj)
+                            np.multiply(h1_buf, proj, out=dk_buf)
+                            if dgreen_sign > 0.0:
+                                np.negative(dk_buf, out=dk_buf)
+                            for a in range(width):
+                                _accumulate_first(
+                                    part_kt[a], dk_buf, w_src_qj * float(phi_s[a]),
+                                    qj, cscratch,
+                                )
+
+                    for a in range(width):
+                        coeff_a = w_obs_qi * float(phi_o[a])
+                        for b in range(width):
+                            if acc_s is not None:
+                                _axpy_into(acc_s[width * a + b], part_s[b], coeff_a, cscratch)
+                            if acc_k is not None:
+                                _axpy_into(acc_k[width * a + b], part_k[b], coeff_a, cscratch)
                     if acc_kt is not None:
-
-
-                        np.multiply(dx, n_ji[0], out=proj)
-                        np.multiply(dy, n_ji[1], out=work)
-                        np.add(proj, work, out=proj)
-                        np.divide(proj, dist, out=proj)
-                        np.multiply(h1_buf, proj, out=dk_buf)
-                        if dgreen_sign > 0.0:
-                            np.negative(dk_buf, out=dk_buf)
-                        for a in range(width):
-                            _accumulate_first(
-                                part_kt[a], dk_buf, w_src_qj * float(phi_s[a]),
-                                qj, cscratch,
-                            )
-
-                for a in range(width):
-                    coeff_a = w_obs_qi * float(phi_o[a])
-                    for b in range(width):
-                        if acc_s is not None:
-                            _axpy_into(acc_s[width * a + b], part_s[b], coeff_a, cscratch)
-                        if acc_k is not None:
-                            _axpy_into(acc_k[width * a + b], part_k[b], coeff_a, cscratch)
-                if acc_kt is not None:
-                    for b in range(width):
-                        coeff_b = w_obs_qi * float(phi_o[b])
-                        for a in range(width):
-                            _axpy_into(acc_kt[width * a + b], part_kt[a], coeff_b, cscratch)
+                        for b in range(width):
+                            coeff_b = w_obs_qi * float(phi_o[b])
+                            for a in range(width):
+                                _axpy_into(acc_kt[width * a + b], part_kt[a], coeff_b, cscratch)
 
             len_prod = obs_len[:, None] * src_len[None, :]
             with write_lock:
@@ -1909,16 +1926,15 @@ def _assemble_linear_operator_matrices_multi(
                             )
                         else:
                             scale_s_ij = scale_ij
+                        # One pass per observer basis function covers every source basis function.
                         for a in range(width):
-                            rows = obs_nid[:, a][:, None]
-                            for b in range(width):
-                                cols = src_nid[None, :, b]
-                                if acc_s is not None:
-                                    scatter_operator_add(s_mats[mi], rows, cols,
-                                              acc_s[width * a + b] * scale_s_ij)
-                                if acc_k is not None and want_k_masks[mi]:
-                                    scatter_operator_add(k_mats[mi], rows, cols,
-                                              acc_k[width * a + b] * scale_ij)
+                            rows = obs_nid[:, a]
+                            if acc_s is not None:
+                                scatter_basis_columns(s_mats[mi], rows, src_nid,
+                                                      acc_s[width * a:width * (a + 1)] * scale_s_ij)
+                            if acc_k is not None and want_k_masks[mi]:
+                                scatter_basis_columns(k_mats[mi], rows, src_nid,
+                                                      acc_k[width * a:width * (a + 1)] * scale_ij)
                     fji = far_ji.get(mi)
                     if fji is not None and fji.any():
                         scale_ji = len_prod * fji
@@ -1931,17 +1947,13 @@ def _assemble_linear_operator_matrices_multi(
                         else:
                             scale_s_ji = scale_ji
                         for a in range(width):
-                            rows = src_nid[:, a][:, None]
-                            for b in range(width):
-                                cols = obs_nid[None, :, b]
-                                if acc_s is not None:
-
-
-                                    scatter_operator_add(s_mats[mi], rows, cols,
-                                              (acc_s[width * b + a] * scale_s_ji).T)
-                                if acc_kt is not None and want_k_masks[mi]:
-                                    scatter_operator_add(k_mats[mi], rows, cols,
-                                              (acc_kt[width * a + b] * scale_ji).T)
+                            rows = src_nid[:, a]
+                            if acc_s is not None:
+                                scatter_basis_columns(s_mats[mi], rows, obs_nid,
+                                                      (acc_s[a::width] * scale_s_ji).transpose(0, 2, 1))
+                            if acc_kt is not None and want_k_masks[mi]:
+                                scatter_basis_columns(k_mats[mi], rows, obs_nid,
+                                                      (acc_kt[width * a:width * (a + 1)] * scale_ji).transpose(0, 2, 1))
 
         if local_near:
             with write_lock:

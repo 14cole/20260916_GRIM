@@ -293,4 +293,5 @@ def select_far_kernels(mesh, k, green, hankel, domain_upper=None):
             exact_subset(green, k0, real_k, dist, g, bad)
             exact_subset(hankel, k0, real_k, dist, h, bad)
     fg.pair = pair
+    fg.table = table
     return fg, fh

@@ -20,7 +20,9 @@ Monostatic runs:
 
 - **Backend.** Dense or compressed Galerkin, ranked by predicted work for the
   geometry, materials and angle count, and admitted against available RAM
-  (90% of currently available memory).
+  (90% of currently available memory). Compressed solves may keep up to 60%
+  of that limit (at least 2 GiB) for both polarizations' operators and the
+  preconditioner.
 - **Mesh.** An adaptive polynomial mesh: a quadratic candidate with a cubic
   accuracy check, local refinement when the comparison fails, and a global
   linear mesh as the final fallback.

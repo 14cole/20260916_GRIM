@@ -62,6 +62,15 @@ class CompactOperator:
         return result
 
 
+def scatter_basis_columns(matrix, rows, columns, values):
+    """scatter_operator_add(matrix, rows[:, None], columns[None, :, b], values[b]) for each b."""
+    if hasattr(matrix, 'scatter_add_columns'):
+        matrix.scatter_add_columns(rows, columns, values)
+        return
+    for b in range(columns.shape[1]):
+        scatter_operator_add(matrix, rows[:, None], columns[None, :, b], values[b])
+
+
 def scatter_operator_add(matrix, rows, columns, values):
     """Accumulate one bounded tile, retaining only requested rows/columns."""
     if hasattr(matrix, 'scatter_add'):

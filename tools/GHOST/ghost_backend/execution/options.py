@@ -28,8 +28,10 @@ DEFAULTS = {
     'far_quadrature_order': 0,
     'far_grading': True,
 }
-EFFICIENT_DEFAULTS = dict(DEFAULTS, factorization='adaptive', mesh_strategy='adaptive', compressed_storage_mib=2048,
-                          assembly_threads=4, blas_threads=2)
+# compressed_storage_mib 0 sizes compressed storage from the solve's RAM limit at run time.
+AUTOMATIC_STORAGE_MIB = 0
+EFFICIENT_DEFAULTS = dict(DEFAULTS, factorization='adaptive', mesh_strategy='adaptive',
+                          compressed_storage_mib=AUTOMATIC_STORAGE_MIB, assembly_threads=4, blas_threads=2)
 _ACTIVE = ScopedValue('ghost_execution_options', default=None)
 _ASSEMBLY_ALLOCATION = ScopedValue('ghost_assembly_allocation', default=None)
 _MEMORY_ALLOCATION = ScopedValue('ghost_memory_allocation', default=None)
@@ -69,8 +71,10 @@ def validate_options(value):
         raise ValueError('Mesh strategy must be global, local or adaptive.')
     if result['rhs_compression'] not in ('off', 'auto', 'on'):
         raise ValueError('RHS compression must be off, auto, or on.')
-    for key, lower, upper in [('compressed_storage_mib', 16, 1048576),
-                              ('blas_threads', 1, 1024), ('angle_batch_size', 1, 256),
+    storage = result['compressed_storage_mib']
+    if type(storage) is not int or not (storage == AUTOMATIC_STORAGE_MIB or 16 <= storage <= 1048576):
+        raise ValueError('compressed_storage_mib must be 0 for automatic or an integer from 16 to 1048576.')
+    for key, lower, upper in [('blas_threads', 1, 1024), ('angle_batch_size', 1, 256),
                               ('assembly_tile', 0, 65536), ('far_quadrature_order', 0, 64)]:
         number = result[key]
         if type(number) is not int or not lower <= number <= upper:

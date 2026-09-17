@@ -769,14 +769,16 @@ def runtime_environment_payload() -> 'Dict[str, Any]':
     implementation = getattr(sys, "implementation", None)
     from ghost_backend.linalg.hierarchical import factor_mode
     from ghost_backend.linalg.sweep import mode as compression_mode
-    from ghost_backend.compressed.runtime import storage_budget
+    from ghost_backend.compressed.runtime import automatic_storage, storage_budget
     from ghost_backend.execution.options import current_options
     profile = current_options()
     factorization = profile['factorization'] if profile is not None else factor_mode()
     return {
         "execution_options": profile,
         "cpu_factorization": factorization,
-        "compressed_storage_budget_bytes": storage_budget() if factorization in ('compressed', 'adaptive') else None,
+        # Automatic storage follows free memory at solve time, so record the setting, not bytes.
+        "compressed_storage_budget_bytes": (('automatic' if automatic_storage() else storage_budget())
+                                            if factorization in ('compressed', 'adaptive') else None),
         "cpu_rhs_compression": compression_mode(),
         "python_version": sys.version,
         "python_implementation": getattr(implementation, "name", ""),

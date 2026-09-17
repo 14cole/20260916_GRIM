@@ -8,11 +8,28 @@ class SystemScatter:
         self.matrix = matrix
         self.row_ids = CompactOperator._ids(rows, node_count)
         self.column_ids = CompactOperator._ids(columns, node_count)
-        self.row_map = np.full(node_count, -1, dtype=np.int64)
-        self.column_map = np.full(node_count, -1, dtype=np.int64)
-        self.row_map[self.row_ids] = np.arange(len(self.row_ids))
-        self.column_map[self.column_ids] = np.arange(len(self.column_ids))
+        self.node_count = node_count
+        self._maps = None
         self.routes = routes
+
+    def _node_maps(self):
+        # Built on first use: compressed tiles create many destinations whose
+        # routes carry their own maps and never read these.
+        if self._maps is None:
+            row_map = np.full(self.node_count, -1, dtype=np.int64)
+            column_map = np.full(self.node_count, -1, dtype=np.int64)
+            row_map[self.row_ids] = np.arange(len(self.row_ids))
+            column_map[self.column_ids] = np.arange(len(self.column_ids))
+            self._maps = row_map, column_map
+        return self._maps
+
+    @property
+    def row_map(self):
+        return self._node_maps()[0]
+
+    @property
+    def column_map(self):
+        return self._node_maps()[1]
 
     def scatter_add(self, rows, columns, values):
         rows, columns = np.asarray(rows), np.asarray(columns)
@@ -25,6 +42,48 @@ class SystemScatter:
             if np.any(keep):
                 scaled = np.broadcast_to(values, keep.shape) * np.broadcast_to(weights[rows], keep.shape)
                 np.add.at(self.matrix, (rr[keep], cc[keep]), scaled[keep])
+
+    def scatter_add_columns(self, rows, columns, values):
+        """scatter_add(rows[:, None], columns[None, :, b], values[b]) for each b in order.
+
+        Distinct routes of one destination never write the same entry (they differ
+        in equation rows or in source-side columns), so one pass per route keeps
+        every entry's sum order.
+        """
+        rows, columns = np.asarray(rows), np.asarray(columns)
+        width = columns.shape[1]
+        values = np.broadcast_to(values, (width, len(rows), len(columns)))
+        if type(self).scatter_add is not SystemScatter.scatter_add:
+            for b in range(width):
+                self.scatter_add(rows[:, None], columns[None, :, b], values[b])
+            return
+        matrix = self.matrix
+        from ghost_backend.twod.assembly.native.far import scatter_columns
+        for row_map, column_map, weights in self.routes:
+            if scatter_columns(matrix, rows, columns, row_map, column_map, values * weights[rows][None, :, None]):
+                continue
+            ri = np.flatnonzero(row_map[rows] >= 0)
+            if not len(ri):
+                continue
+            cc = column_map[columns].T
+            keep = cc >= 0
+            if not keep.any():
+                continue
+            r = row_map[rows[ri]]
+            if len(ri) == len(rows):
+                block = values * weights[rows][None, :, None]
+            else:
+                block = values[:, ri, :] * weights[rows[ri]][None, :, None]
+            keep = np.broadcast_to(keep[:, None, :], block.shape)
+            if matrix.flags.f_contiguous:
+                index = r[None, :, None] + cc[:, None, :] * matrix.shape[0]
+                np.add.at(matrix.reshape(-1, order='F'), index[keep], block[keep])
+            elif matrix.flags.c_contiguous:
+                index = r[None, :, None] * matrix.shape[1] + cc[:, None, :]
+                np.add.at(matrix.reshape(-1), index[keep], block[keep])
+            else:
+                rr = np.broadcast_to(r[None, :, None], block.shape)
+                np.add.at(matrix, (rr[keep], np.broadcast_to(cc[:, None, :], block.shape)[keep]), block[keep])
 
     def _scatter_outer(self, rows, columns, values):
         """rows x columns tiles: same sums as scatter_add, without per-entry index arrays."""

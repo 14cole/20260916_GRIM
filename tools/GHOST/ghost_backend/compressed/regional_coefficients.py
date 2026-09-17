@@ -26,6 +26,20 @@ def hankel_envelopes(k, lower_distance):
     return g*(1+1e-8),h*(1+1e-8)
 
 
+def hankel_envelope(k, attenuation, kind):
+    """hankel_envelopes(k, lower)[kind] once attenuation = -Im(k)*lower is known to exceed 1."""
+    decay = np.exp(-np.minimum(attenuation,700))
+    if kind == 0:
+        value = decay/np.sqrt(8*np.pi*attenuation)
+    else:
+        value = abs(k)*decay/np.sqrt(8*np.pi*(attenuation-1))
+    return value*(1+1e-8)
+
+
+def _span(ids):
+    return (int(ids.min()), int(ids.max())) if len(ids) else (0, -1)
+
+
 class PreparedOracle:
     def __init__(self,mesh,infos,pol,cut=None,obs_order=8,src_order=8):
         self.obs_order,self.src_order=obs_order,src_order
@@ -61,8 +75,15 @@ class PreparedOracle:
                     weight=1 if coefficient is None else abs(coefficient[j])
                     np.add.at(weighted_mass,np.asarray(e.node_ids),weight*integral_bounds(e))
                 # Nodes that each route can reach, so tile queries skip whole-mesh maps.
-                reach=[[(old_r,old_c,weight,np.flatnonzero(old_r>=0),np.flatnonzero(old_c>=0))
-                        for old_r,old_c,weight in output.routes] for output in template]
+                reach=[]
+                for output in template:
+                    routes=[]
+                    for old_r,old_c,weight in output.routes:
+                        row_nodes,column_nodes=np.flatnonzero(old_r>=0),np.flatnonzero(old_c>=0)
+                        row_dofs,column_dofs=old_r[row_nodes],old_c[column_nodes]
+                        routes.append((old_r,old_c,weight,row_nodes,column_nodes,row_dofs,column_dofs,
+                                       _span(row_dofs),_span(column_dofs)))
+                    reach.append(routes)
                 prepared.append((request,reach,source,coefficient,source_mass,weighted_mass))
             self.groups.append((k,prepared))
 
@@ -95,6 +116,7 @@ class PreparedOracle:
         self.entries+=matrix.size;self.calls+=1;self.max_entries=max(self.max_entries,matrix.size)
         rd,cd=np.full(self.n,-1,int),np.full(self.n,-1,int)
         rd[rows]=np.arange(len(rows));cd[cols]=np.arange(len(cols))
+        row_span,column_span=_span(rows),_span(cols)
         nn=len(self.mesh.nodes)
         pending=[]
         for k,prepared in self.groups:
@@ -102,11 +124,14 @@ class PreparedOracle:
             for request,reach,source,coefficient,source_mass,weighted_mass in prepared:
                 pair=[]
                 for kind,output in enumerate(reach):
-                    routes=[]
-                    for old_r,old_c,weight,row_nodes,column_nodes in output:
-                        local_r=rd[old_r[row_nodes]];ri=row_nodes[local_r>=0]
+                    routes=[];reached_rows=[];reached_columns=[]
+                    for old_r,old_c,weight,row_nodes,column_nodes,row_dofs,column_dofs,dof_rows,dof_columns in output:
+                        # Disjoint DOF ranges prove a route misses this tile without a gather.
+                        if dof_rows[1]<row_span[0] or dof_rows[0]>row_span[1]:continue
+                        local_r=rd[row_dofs];ri=row_nodes[local_r>=0]
                         if not len(ri):continue
-                        local_c=cd[old_c[column_nodes]];ci=column_nodes[local_c>=0]
+                        if dof_columns[1]<column_span[0] or dof_columns[0]>column_span[1]:continue
+                        local_c=cd[column_dofs];ci=column_nodes[local_c>=0]
                         if not len(ci):continue
                         r,c=np.full(nn,-1,int),np.full(nn,-1,int)
                         r[ri]=local_r[local_r>=0];c[ci]=local_c[local_c>=0]
@@ -116,17 +141,22 @@ class PreparedOracle:
                             dy=self.xy[ri,1][:,None]-self.xy[ci,1][None,:]
                             np.multiply(dx,dx,out=dx);np.multiply(dy,dy,out=dy)
                             lower=np.sqrt(np.add(dx,dy,out=dx),out=dx);dy=None
-                            lower=np.maximum(0,lower-self.radius[ri,None]-self.radius[None,ci])
-                            if np.all(-complex(k).imag*lower>=self.cut):
-                                envelopes=hankel_envelopes(k,lower)
-                                if envelopes is not None:
+                            np.subtract(lower,self.radius[ri,None],out=lower)
+                            np.subtract(lower,self.radius[None,ci],out=lower)
+                            lower=np.maximum(0,lower,out=lower)
+                            attenuation=-complex(k).imag*lower
+                            # cut > 1, so passing pairs satisfy hankel_envelopes' own domain checks.
+                            if np.all(attenuation>=self.cut):
+                                if complex(k).real>0:
                                     obs=weighted_mass[ri] if kind==0 else self.normal_mass[ri]
-                                    bound=envelopes[kind]*obs[:,None]*source_mass[None,ci]*abs(weight[ri,None])
+                                    bound=hankel_envelope(k,attenuation,kind)*obs[:,None]*source_mass[None,ci]*abs(weight[ri,None])
                                     np.add.at(error.reshape(-1),(r[ri,None]*error.shape[1]+c[None,ci]).ravel(),bound.ravel())
                                     self.dropped_routes+=1;dropped=True
-                        if not dropped:routes.append((r,c,weight))
-                    rid=np.flatnonzero(np.any([r>=0 for r,c,w in routes],axis=0)) if routes else np.empty(0,int)
-                    cid=np.flatnonzero(np.any([c>=0 for r,c,w in routes],axis=0)) if routes else np.empty(0,int)
+                        if not dropped:
+                            routes.append((r,c,weight));reached_rows.append(ri);reached_columns.append(ci)
+                    # Sorted unions of the kept routes' nodes, as a scan of their maps would give.
+                    rid=np.unique(np.concatenate(reached_rows)) if routes else np.empty(0,int)
+                    cid=np.unique(np.concatenate(reached_columns)) if routes else np.empty(0,int)
                     pair.append(ss.SystemScatter(matrix,nn,rid,cid,routes))
                 if any(len(o.row_ids) and len(o.column_ids) for o in pair):
                     outputs.append(pair);masks.append(source);coefficients.append(coefficient)

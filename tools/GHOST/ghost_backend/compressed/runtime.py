@@ -10,10 +10,23 @@ def enabled():
     return environment_value('GHOST_CPU_FACTORIZATION','dense').strip().lower()=='compressed'
 
 
+# Automatic storage keeps both polarizations' operators and the inverse within this
+# share of the solve memory limit; the rest covers assembly and solve workspaces.
+AUTOMATIC_STORAGE_FRACTION=.6
+AUTOMATIC_STORAGE_FLOOR=2048*1024**2
+
+
+def automatic_storage():
+    return environment_value('GHOST_COMPRESSED_STORAGE_MIB','2048').strip()=='0'
+
+
 def storage_budget():
     text=environment_value('GHOST_COMPRESSED_STORAGE_MIB','2048').strip()
     try:value=int(text)
-    except ValueError:raise ValueError('GHOST_COMPRESSED_STORAGE_MIB must be a positive integer.')
+    except ValueError:raise ValueError('GHOST_COMPRESSED_STORAGE_MIB must be a positive integer, or 0 for automatic.')
+    if value==0:
+        from ghost_backend.twod.solver import _solve_memory_limit_gb
+        return max(AUTOMATIC_STORAGE_FLOOR,int(AUTOMATIC_STORAGE_FRACTION*_solve_memory_limit_gb()*1024**3))
     if value<16:raise ValueError('GHOST_COMPRESSED_STORAGE_MIB must be at least 16 MiB.')
     return value*1024**2
 
