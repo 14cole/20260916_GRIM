@@ -15,8 +15,6 @@ from ghost_backend.execution.runtime import ScopedValue
 DEFAULTS = {
     'version': 1,
     'factorization': 'dense',
-    'discretization': 'galerkin',
-    'pulse_pec_cfie': True,
     'mesh_strategy': 'global',
     'basis_order': 1,
     'compressed_storage_mib': 2048,
@@ -29,13 +27,6 @@ DEFAULTS = {
     'assembly_tile': 0,
     'far_quadrature_order': 0,
     'far_grading': True,
-    'fmm_tolerance': 1e-10,
-    'fmm_solver_tolerance': 1e-9,
-    'fmm_restart': 80,
-    'fmm_max_iterations': 800,
-    'fmm_recycle_vectors': 'auto',
-    'fmm_pec_cfie': 'auto',
-    'fmm_quadrature_order': 0,
 }
 EFFICIENT_DEFAULTS = dict(DEFAULTS, factorization='adaptive', mesh_strategy='adaptive', compressed_storage_mib=2048,
                           assembly_threads=4, blas_threads=2)
@@ -70,22 +61,8 @@ def validate_options(value):
     result.update(value)
     if type(result['version']) is not int or result['version'] != 1:
         raise ValueError('Unsupported execution settings version.')
-    if result['factorization'] not in ('dense', 'hierarchical', 'auto', 'compressed', 'adaptive', 'fmm'):
-        raise ValueError('Choose dense, hierarchical, auto, compressed, adaptive, or fmm factorization.')
-    if result['discretization'] not in ('galerkin','pulse'):
-        raise ValueError('Choose galerkin or pulse discretization.')
-    if result['discretization']=='pulse':
-        if result['basis_order']!=1:
-            raise ValueError('Pulse uses constant panel densities; polynomial enrichment requires Galerkin.')
-        if result['mesh_strategy']=='adaptive':result['mesh_strategy']='global'
-    if type(result['pulse_pec_cfie']) is not bool:
-        raise ValueError('Pulse PEC combined field must be true or false.')
-    for key in ('fmm_tolerance','fmm_solver_tolerance'):
-        number=result[key]
-        if type(number) not in (int,float) or not math.isfinite(number) or not 1e-13<=number<=1e-5:
-            raise ValueError('{} must be finite and between 1e-13 and 1e-5.'.format(key))
-    if result['fmm_tolerance']>result['fmm_solver_tolerance']:
-        raise ValueError('FMM kernel tolerance must not exceed solver tolerance.')
+    if result['factorization'] not in ('dense', 'hierarchical', 'auto', 'compressed', 'adaptive'):
+        raise ValueError('Choose dense, hierarchical, auto, compressed, or adaptive factorization.')
     if type(result['basis_order']) is not int or result['basis_order'] not in (1, 2, 3):
         raise ValueError('Boundary polynomial degree must be 1, 2 or 3.')
     if result['mesh_strategy'] not in ('global', 'local', 'adaptive'):
@@ -94,17 +71,10 @@ def validate_options(value):
         raise ValueError('RHS compression must be off, auto, or on.')
     for key, lower, upper in [('compressed_storage_mib', 16, 1048576),
                               ('blas_threads', 1, 1024), ('angle_batch_size', 1, 256),
-                              ('assembly_tile', 0, 65536), ('far_quadrature_order', 0, 64),
-                              ('fmm_restart',10,512),('fmm_max_iterations',1,100000)]:
+                              ('assembly_tile', 0, 65536), ('far_quadrature_order', 0, 64)]:
         number = result[key]
         if type(number) is not int or not lower <= number <= upper:
             raise ValueError('{} must be an integer from {} to {}.'.format(key, lower, upper))
-    recycle = result['fmm_recycle_vectors']
-    if recycle != 'auto' and (type(recycle) is not int or not 0 <= recycle <= 64):
-        raise ValueError('FMM recycle vectors must be auto or an integer from 0 to 64.')
-    quadrature = result['fmm_quadrature_order']
-    if type(quadrature) is not int or quadrature != 0 and not 6 <= quadrature <= 64:
-        raise ValueError('FMM quadrature order must be 0 (automatic) or an integer from 6 to 64.')
     threads = result['assembly_threads']
     if threads != 'auto' and (type(threads) is not int or not 1 <= threads <= 1024):
         raise ValueError('Assembly threads must be auto or an integer from 1 to 1024.')
@@ -113,8 +83,6 @@ def validate_options(value):
         raise ValueError('RAM budget must be positive GiB or null for available memory.')
     if type(result['far_grading']) is not bool:
         raise ValueError('Far grading must be true or false.')
-    if type(result['fmm_pec_cfie']) is not bool and result['fmm_pec_cfie'] != 'auto':
-        raise ValueError('FMM PEC combined-field selection must be auto, true or false.')
     directory = result['temporary_directory']
     if not isinstance(directory, str) or any(c in directory for c in '\r\n\x00'):
         raise ValueError('Temporary directory must be a path string.')
@@ -217,15 +185,13 @@ def validate_for_run(options, method='direct', precision='double', scattering='m
     mode = value['factorization']
     if (value['mesh_strategy']=='adaptive' or value['basis_order']>1) and (kind!='2d' or scattering!='monostatic'):
         raise ValueError('Adaptive polynomial meshing supports 2D monostatic runs only.')
-    if value['discretization']=='pulse' and (kind!='2d' or scattering!='monostatic' or precision!='double'):
-        raise ValueError('Pulse collocation currently supports double-precision 2D monostatic solves only.')
     if value['mesh_strategy'] == 'local' and (kind != '2d' or scattering != 'monostatic'):
         raise ValueError('Local material meshing supports 2D monostatic runs only.')
     if kind != '2d' and mode != 'dense':
         raise ValueError('Hierarchical and compressed selections apply to the 2D solver only.')
     if mode != 'dense' and (precision != 'double' or scattering != 'monostatic'):
         raise ValueError('Hierarchical and compressed runs require monostatic scattering and double precision.')
-    if mode in ('compressed', 'adaptive', 'fmm') and method not in ('auto','experimental_cpu','fmm'):
+    if mode in ('compressed', 'adaptive') and method not in ('auto','experimental_cpu'):
         raise ValueError('Compressed assembly requires CPU streaming kernel evaluation.')
     if method == 'experimental_cpu' and (precision != 'double' or scattering != 'monostatic'):
         raise ValueError('CPU streaming requires monostatic scattering and double precision.')
@@ -333,15 +299,6 @@ def configured_execution(function):
             if 'max_panels' in signature.parameters and 'max_panels' not in supplied.arguments:
                 supplied.arguments['max_panels']=100_000
             args,kwargs=supplied.args,supplied.kwargs
-        fmm_requested=str(supplied.arguments.get('solver_method','')).strip().lower()=='fmm'
-        if fmm_requested:
-            if requested is not None and not isinstance(requested,dict):
-                raise ValueError('Execution settings must be an object.')
-            if requested is not None and requested.get('factorization','fmm')!='fmm':
-                raise ValueError('solver_method=fmm conflicts with the requested factorization.')
-            requested=dict(requested or inherited or {},factorization='fmm')
-            supplied.arguments['solver_method']='experimental_cpu'
-            args,kwargs=supplied.args,supplied.kwargs
         if requested is not None and inherited is not None and validate_options(requested) != inherited:
             raise ValueError('A nested solve must use the active execution settings.')
         value = requested if requested is not None else inherited
@@ -380,7 +337,7 @@ def configured_execution(function):
                 from ghost_backend.execution.timing_history import adjust
                 selection=adjust(selection,timing_key,batch=batch_planned)
             value = dict(value, factorization=selection['selected'])
-        if bound.arguments.get('solver_method') == 'auto' and value['factorization'] in ('compressed','fmm'):
+        if bound.arguments.get('solver_method') == 'auto' and value['factorization'] == 'compressed':
             bound.arguments['solver_method']='experimental_cpu'
             args,kwargs=bound.args,bound.kwargs
         def invoke():
@@ -431,9 +388,6 @@ def configured_execution(function):
                 result['metadata']['execution_wall_seconds']=time.perf_counter()-execution_start
                 if allocated_memory_budget() is not None:
                     result['metadata']['execution_memory_reservation_gib']=allocated_memory_budget()
-                if value['factorization']=='fmm' and not result['metadata'].get('adaptive_mesh'):
-                    result['metadata']['solver_method']=('pulse_fmm_gmres' if value['discretization']=='pulse' else 'galerkin_fmm_gmres')
-                    if fmm_requested:result['metadata']['solver_method_requested']='fmm'
                 if selection is not None:
                     if per_frequency and metadata.get('backend_selection'):
                         metadata['request_backend_selection'] = selection
@@ -447,7 +401,6 @@ def configured_execution(function):
                 if timing_key is not None:
                     from ghost_backend.execution.timing_history import record
                     record(timing_key,actual['factorization'],result['metadata']['execution_wall_seconds'],result['metadata'])
-                result['metadata']['discretization']=value['discretization']
             return result
     @wraps(function)
     def call(*args,**kwargs):

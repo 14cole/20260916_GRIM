@@ -68,7 +68,7 @@ def measured_costs(key):
     if not isinstance(entry,dict):return {}
     result={}
     for mode,rows in entry.items():
-        if mode not in ('dense','compressed','fmm') or not isinstance(rows,list):continue
+        if mode not in ('dense','compressed') or not isinstance(rows,list):continue
         values=[]
         for row in rows[-5:]:
             if not isinstance(row,list) or len(row)!=2:continue
@@ -99,7 +99,7 @@ def adjust(selection,key,batch=False):
 
 
 def record(key,mode,seconds,metadata):
-    if (key is None or mode not in ('dense','compressed','fmm') or not math.isfinite(seconds) or seconds<=0 or
+    if (key is None or mode not in ('dense','compressed') or not math.isfinite(seconds) or seconds<=0 or
         seconds>MAX_AGE or not metadata.get('quality_gate',{}).get('passed') or
         metadata.get('backend_selection',{}).get('failed_attempts')):return
     if metadata.get('frequency_metadata') and any(

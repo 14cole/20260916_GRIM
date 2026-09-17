@@ -4,7 +4,7 @@ import os,subprocess,sys
 import tempfile
 
 root=Path(__file__).resolve().parents[1]
-names=('polynomial_basis','adaptive_polynomial','automatic_backend','automatic_hpc','batch_presets','fmm','fmm_efficiency','pulse','nystrom','near_separation','direct_solver_methods','execution_options',
+names=('polynomial_basis','adaptive_polynomial','automatic_backend','automatic_hpc','batch_presets','nystrom','near_separation','direct_solver_methods','execution_options',
        'rcs_physics_regression','2d_capability_acceptance','experimental_cpu','solver_followups',
        'compact_multi_region','compressed_path','memory_safety','thin_sheet',
        'scipy_compatibility')

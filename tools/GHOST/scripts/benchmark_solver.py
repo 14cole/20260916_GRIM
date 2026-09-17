@@ -49,7 +49,7 @@ def main():
     parser.add_argument('--threads',type=int,default=2)
     parser.add_argument('--ram-gib',type=float,default=None)
     parser.add_argument('--storage-mib',type=int,default=2048)
-    parser.add_argument('--modes',nargs='+',choices=['auto','dense','compressed','fmm'],default=['auto'])
+    parser.add_argument('--modes',nargs='+',choices=['auto','dense','compressed'],default=['auto'])
     parser.add_argument('--repeats',type=int,default=2)
     parser.add_argument('--certified',action='store_true')
     parser.add_argument('--mesh-strategy',choices=['adaptive','global','local'],default='adaptive',

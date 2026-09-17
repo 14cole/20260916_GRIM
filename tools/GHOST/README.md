@@ -24,7 +24,7 @@ BOR controls include a bounded coefficient cache for compressed solves. See
 
 Only `run_gui.py` and the four local/HPC run scripts are directly inside
 `ghost_backend`. Native source, libraries, and build tools are under
-`ghost_backend/bor/native/` and `ghost_backend/twod/fmm/native/`; runtime support is under `ghost_backend/execution/`.
+`ghost_backend/bor/native/` and `ghost_backend/twod/assembly/native/`; runtime support is under `ghost_backend/execution/`.
 
 Batch drivers save new runs under `ghost_backend/results/rcs_runs` or
 `ghost_backend/results/rcs_runs_bor` by default. Explicit output paths and saved
@@ -35,7 +35,7 @@ geometry operations, feature assembly, and run management. The
 [file-removal audit](DEAD_FILES.md) identifies cleanup candidates.
 
 New 2D monostatic GUI, API, and local/HPC runs default to **Automatic**.
-The backend compares compatible dense, compressed, and FMM Galerkin solves
+The backend compares compatible dense and compressed Galerkin solves
 using geometry, materials, angle count, memory, and predicted computation cost.
 Users can run ordinary studies without choosing a solver implementation.
 Detailed kernel, factorization, and geometry presets are under **Advanced
@@ -43,19 +43,13 @@ Settings**, which starts collapsed. Existing explicit saved settings are kept.
 See [automatic solver behavior and qualification](AUTOMATIC_SOLVER.md) and
 [saved execution profiles](RUN_PROFILES.md) for overrides and resource limits.
 
-Advanced Settings also offers **Pulse / midpoint collocation** under
-**Boundary discretization**. Pulse supports dense, compressed and FMM execution
-for 2-D monostatic PEC/impedance bodies and bulk dielectric interfaces.
-See [Pulse and FMM efficiency updates](PULSE_FMM_UPDATES.md) for controls,
-measurements, supported configurations and accuracy tradeoffs.
-
 [2D pipeline controls](TWOD_PIPELINE.md) describe automatic backend selection,
 optional local material meshing, faster geometry validation, and desktop
 frequency checkpoints with verified resume.
 
 Local and HPC batch drivers accept `--config path/to/settings.config.json`.
 The 2D scripts expose `SOLVE_PRESET="auto"` plus optional `ADVANCED_OVERRIDES`.
-Auto compares predicted completion of the batch with dense, compressed, FMM, and
+Auto compares predicted completion of the batch with dense, compressed, and
 mixed workers on the execution node. `small`, `balanced`, and `large` select
 the corresponding desktop presets. See [batch presets](RUN_PROFILES.md).
 They also automatically load an adjacent file with the same stem and the
@@ -96,10 +90,9 @@ The recommended desktop workflow is the top-level GRIM application. Its
 **GHOST** tab embeds the same `ghost_backend/run_gui.py` workspace and the same
 2-D/BoR numerical implementation found here; no solver is duplicated.
 
-The 2-D diagnostic API defaults to `auto`, with `direct`, `experimental_cpu`,
-and `fmm` available as explicit overrides. NumPy and SciPy are required for
-numerical methods and condition-number checks. Native FMM acceleration is
-optional; Automatic excludes FMM when its native library is unavailable.
+The 2-D diagnostic API defaults to `auto`, with `direct` and `experimental_cpu`
+available as explicit overrides. NumPy and SciPy are required for
+numerical methods and condition-number checks.
 BoR supports its separate optional native streaming kernel.
 BoR also has [bounded aspect batches, incident-basis reuse, and experimental
 compressed modal assembly](BOR_PERFORMANCE.md), with separate controls in

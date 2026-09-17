@@ -1,41 +1,13 @@
-"""Shared CPU backend eligibility and relative runtime prior.
+"""Shared CPU backend relative runtime prior.
 
 The prior ranks work; it is not a wall-time or optimality guarantee. It retains
-the measured dense preference on small/medium systems and accounts for FMM's
-per-illumination iterations. Both desktop and execution-node scheduling use it.
+the measured dense preference on small/medium systems. Both desktop and
+execution-node scheduling use it.
 """
 import math
 
-MODEL = 'geometry_work_v3_pulse'
-BACKENDS = ('dense', 'compressed', 'fmm')
-
-
-def native_fmm_available():
-    try:
-        from ghost_backend.twod.fmm.kernel import library
-        library()
-        return True
-    except (OSError, RuntimeError, AttributeError):
-        return False
-
-
-def fmm_eligibility(resources, mesh=None, infos=None):
-    if resources.get('formulation') == 'thin_dielectric_layer' and not resources.get('analytic_zero'):
-        return False, 'Nonzero thin-layer approximations require a qualified dense/compressed formulation.'
-    if mesh is not None and infos is not None:
-        import numpy as np
-        lengths=np.asarray([e.length for e in mesh.elements])
-        longest=float(lengths.max()) if len(lengths) else 0.
-        for info in infos:
-            for side in ('minus','plus'):
-                if getattr(info,side+'_region') < 0:
-                    continue
-                k=complex(getattr(info,'k_'+side))
-                if not math.isfinite(abs(k)) or k.real <= 0 or k.imag > 0:
-                    return False, 'The material wavenumber is outside the qualified native FMM range.'
-                if max(8,math.ceil(abs(k)*longest/2)+4) > 64:
-                    return False, 'The supplied mesh requires more than 64 FMM quadrature nodes per panel.'
-    return True, 'Supported 2-D material equations.'
+MODEL = 'geometry_work_v4'
+BACKENDS = ('dense', 'compressed')
 
 
 def relative_cost(resources, n_angles, mode):
@@ -44,25 +16,17 @@ def relative_cost(resources, n_angles, mode):
     if resources.get('analytic_zero'):
         return .001
     assembly=7e-7*n*n*kernels
-    # Integrated P0 timings include accurate near integrals and routing; kernel
-    # sample-count ratios alone substantially overpredict its assembly gain.
-    if resources.get('discretization')=='pulse':assembly*=.75
     dense=.025 + assembly + 4e-12*d**3 + 2e-10*d*d*angles
     if mode == 'dense':
         return dense
     if mode == 'compressed':
         return 1.4*dense
-    if mode != 'fmm':
-        raise ValueError('Unknown automatic backend.')
-    # Conservative prior from isolated Galerkin/FMM measurements. Recycled
-    # solves can beat this prior; difficult cavities/materials can exceed it.
-    return .025 + .00045*n*kernels + .0012*n*max(1.,math.log2(n))*kernels*angles/3.
+    raise ValueError('Unknown automatic backend.')
 
 
 def available_candidates(candidates):
-    """Check native availability on the host that will actually execute."""
-    return {mode:dict(c) for mode,c in candidates.items()
-            if mode != 'fmm' or native_fmm_available()}
+    """Copy candidates for ranking; every backend runs on any CPU host."""
+    return {mode:dict(c) for mode,c in candidates.items()}
 
 
 def rank_candidates(candidates, budget_gib, margin=.2):

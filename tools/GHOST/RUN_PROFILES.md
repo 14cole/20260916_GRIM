@@ -12,18 +12,17 @@ MAX_SOLVE_GB = None              # optional per-solve RAM admission limit
 
 `small`, `balanced`, and `large` match the desktop geometry presets below.
 `auto` targets **predicted batch completion time**. On the execution node it
-compares compatible dense, compressed, FMM, and mixed schedules using each
+compares compatible dense, compressed, and mixed schedules using each
 frequency's geometry/material forecast, angle count, allocated CPUs, worker
-ceiling, and schedulable RAM. Missing native FMM libraries and unsupported
-formulations exclude that candidate. Completed outputs are verified before reuse.
+ceiling, and schedulable RAM. Completed outputs are verified before reuse.
 The saved factorization value is `adaptive`; the legacy factorization value
 `auto` still means hierarchical factorization with dense fallback.
 
 Schedules with at most 4,096 candidate combinations are compared exhaustively;
-larger searches are bounded. The shared `geometry_work_v3_pulse` cost model is a
+larger searches are bounded. The shared `geometry_work_v4` cost model is a
 conservative heuristic, not a guarantee of the fastest wall time. It uses no
 trial solves and does not model queue delays. The model favors dense solves for
-small and medium systems, while FMM offers a path beyond dense storage capacity.
+small and medium systems, while compressed assembly handles systems beyond dense storage capacity.
 Logs and result metadata retain the choice, forecasts, and reason. An automatic
 backend retry must fit the original worker RAM reservation and retain the
 accuracy tolerances. Invalid input, cancellation, and failed physical mesh
@@ -87,7 +86,7 @@ paths, and cluster allocation settings are configured separately.
 | Small Geometry (No RAM Optimization) | Reference | Dense LU | Off |
 | Large Geometry (RAM Optimization) | CPU streaming | Compressed assembly | Automatic |
 | Balanced | CPU streaming | Dense LU | Automatic |
-| Automatic, default | Automatic | Dense/compressed/FMM selected from geometry, work, and RAM forecasts | Automatic |
+| Automatic, default | Automatic | Dense or compressed selected from geometry, work, and RAM forecasts | Automatic |
 
 All four use double precision, up to four assembly threads and two BLAS threads,
 and 256 angles per batch. Large Geometry uses an 8192 MiB compressed payload
@@ -107,16 +106,13 @@ controls in Advanced Settings.
 New 2D monostatic desktop and local/HPC runs default to Automatic, double
 precision, a 2048 MiB retained-storage allowance, up to four assembly and two
 BLAS threads, automatic sweep basis reuse, and at most 256 angles per batch.
-FMM bounds its physical angle batches to at most 32 and its native density
-groups to at most eight. Thread defaults are reduced on smaller hosts. RAM
+Thread defaults are reduced on smaller hosts. RAM
 admission uses current available memory and any explicit user budget. Mesh
 certification stays enabled. **Use efficient defaults** reapplies Automatic.
 
 Earlier compressed-only airfoil measurements remain useful for manual tuning:
 the 2 GHz certificate used 77.8% less sampled RAM and took 36.7% longer than
 dense LU. The new selector accounts for both predicted time and storage.
-See [the latest measured savings](AUTOMATIC_SOLVER.md) for FMM comparisons and
-their limits.
 
 | Control | Behavior |
 | --- | --- |
@@ -124,8 +120,7 @@ their limits.
 | Hierarchical factor (dense assembly) | Assembles a dense operator and compresses its factorization. |
 | Compressed assembly (low RAM) | Builds compressed tiles from geometry; requires CPU streaming kernels and double precision. |
 | Hierarchical with dense fallback | Can fall back to dense LU; unsuitable when a dense allocation cannot fit. |
-| Automatic backend | Compares compatible dense, compressed, and FMM costs and RAM for both certification meshes. Saved value: `adaptive`. |
-| FMM Galerkin | Uses a native fast multipole operator with corrected near interactions and recycled iterative solves. Requires the optional native library and a supported material formulation. |
+| Automatic backend | Compares compatible dense and compressed costs and RAM for both certification meshes. Saved value: `adaptive`. |
 | Mesh sizing | `global` by default; optional `local` material sizing protects nearby boundaries and geometric features. Certified local runs retry global sizing if mesh convergence fails. |
 | RAM budget per solve | Admission threshold for estimated total RAM, bounded by 90% of currently available memory. Available memory uses that bound alone. This does not enforce an OS memory limit. |
 | Compressed storage cap | Retained numeric operator/inverse payload, including partner-polarization reservations. Workspace and runtime RAM are additional. |
@@ -148,7 +143,7 @@ reduced on small CPU hosts. Total RAM requirements must still fit the machine.
 
 | Setting | Options and purpose | Time and RAM tradeoff |
 | --- | --- | --- |
-| Compressed storage cap | Numeric allowance in MiB for the retained compressed operator and inverse, including reserved partner-polarization data. 8192 MiB is 8 GiB. Active for compressed assembly, FMM near storage, and automatic selection. | The cap does not preallocate RAM, change mesh accuracy, or limit total process memory. Lowering it can cause a storage-cap failure; it does not force tighter compression. Raising it allows larger representations but does not inherently make a solve faster. Workspaces, mesh data, threads, and outputs need additional RAM. |
+| Compressed storage cap | Numeric allowance in MiB for the retained compressed operator and inverse, including reserved partner-polarization data. 8192 MiB is 8 GiB. Active for compressed assembly and automatic selection. | The cap does not preallocate RAM, change mesh accuracy, or limit total process memory. Lowering it can cause a storage-cap failure; it does not force tighter compression. Raising it allows larger representations but does not inherently make a solve faster. Workspaces, mesh data, threads, and outputs need additional RAM. |
 | RAM budget per solve | Available memory, or a specified GiB admission budget. The check also limits admission to 90% of currently available memory. | Use this for total estimated solve RAM. It rejects a run forecast to exceed the budget; it is not an operating-system allocation limit. |
 | Assembly threads | Auto or a positive integer. These workers evaluate geometry interactions and build matrix tiles. Auto follows a batch worker's allocation; desktop Auto uses one thread. | Start at 4, or 1-2 on a smaller machine. More workers can speed assembly, but their workspaces use RAM and they may compete for memory bandwidth. |
 | BLAS threads per solve | Positive integer controlling native matrix operations such as factorization and matrix products. GHOST applies the bundled controller during the solve and restores prior limits afterward. | Start at 2. This limit applies while assembly threads are active. Factorization, condition estimation and angle solves are widened automatically to the solve's CPU reservation (all host cores for a desktop solve), because assembly is idle then. The best value depends on the CPU and matrix size. |
@@ -165,7 +160,7 @@ source also changes the solver identity, so checkpoints from before that
 update will not be reused. Cache files do not replace exporting the final result.
 
 For the supplied airfoil, keep Automatic and mesh certification enabled.
-The backend selects an admitted dense, compressed, or FMM path for the execution
+The backend selects an admitted dense or compressed path for the execution
 host. Resource limits can reflect either a workstation or an HPC allocation.
 Compressed storage is a payload allowance, not a prediction of process RAM.
 

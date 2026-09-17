@@ -261,7 +261,6 @@ def _dense_backend_summary() -> 'Dict[str, Any]':
         "cpu_rhs_compression_requested": compression_mode(),
         "hierarchical_factors": unique_records('hierarchical'),
         "compressed_factors": unique_records('compressed'),
-        "fmm_factors": unique_records('fmm'),
         "sweep_compression": unique_records('sweep_compression'),
         "dense_condition_methods": sorted({row['condition_method'] for row in events if row.get('condition_method')}),
         "linear_backend": (
@@ -761,11 +760,6 @@ def _normalize_public_2d_solver_method(method: 'Any') -> 'str':
     """Accept the supported direct methods before allocating solver arrays."""
 
     normalized = str(method).strip().lower()
-    if normalized == "fmm":
-        raise ValueError(
-            "Select FMM at a public monostatic entry point so its execution scope is established. "
-            "Private formulation helpers accept auto/direct only."
-        )
     if normalized not in {"auto", "direct", EXPERIMENTAL_METHOD}:
         raise ValueError(
             f"Unsupported 2-D solver_method {method!r}; expected 'auto', 'direct', or 'experimental_cpu'."
@@ -1282,27 +1276,6 @@ def _estimate_memory_gb(
     batch = count if gpu else min(configured_batch_size(), count)
     matrix = 16*d*d
     from ghost_backend.linalg.refined_lu import requested_precision
-    if factorization == 'fmm':
-        if requested_precision()!='double' or requested=='gpu':
-            raise ValueError('FMM requires double precision and CPU execution.')
-        from ghost_backend.twod.fmm.memory import forecast
-        from ghost_backend.compressed.runtime import storage_budget
-        plan=forecast(n,d,n_regions,batch,storage_budget(),resources)
-        if dense_resources is not None:dense_resources['memory_estimate']=plan
-        return plan['peak_bytes']/1024**3
-
-    if resources.get('discretization')=='pulse' and factorization!='compressed':
-        # P0 point testing stores no regional dense matrices. Assembly uses
-        # bounded source tiles; retain A alongside LU for residual checks.
-        # One coefficient chunk per assembly thread, sized by the same budget
-        # the chunk itself uses, so the estimate cannot drift from the code.
-        from ghost_backend.twod.pulse.coefficients import SCRATCH_BYTES_PER_THREAD
-        peak=(2*matrix+16*16*d*batch+64*1024**2
-              +SCRATCH_BYTES_PER_THREAD*get_assembly_threads())
-        if factorization in ('hierarchical','auto'):
-            from ghost_backend.linalg.hierarchical import factor_storage_budget
-            peak+=factor_storage_budget(matrix)
-        return (peak+count*4096)/1024**3
     if factorization == 'compressed':
         from ghost_backend.compressed.runtime import storage_budget
         from ghost_backend.linalg.refined_lu import requested_precision
@@ -1649,11 +1622,6 @@ def _dense_formulation_resources(
     selected formulation.
     """
 
-    from ghost_backend.execution.options import option
-    if option('discretization','galerkin')=='pulse':
-        from ghost_backend.twod.pulse.runtime import resources
-        return resources(mesh,infos,pol)
-
     nnodes = int(len(mesh.nodes))
     storage = {}
     regions = {
@@ -1716,20 +1684,6 @@ def _dense_formulation_resources(
         "operator_matrices": int(operator_matrices),
         **storage,
     }
-    longest=max((e.length for e in mesh.elements),default=0.)
-    wavenumbers={complex(getattr(i,'k_'+side)) for i in infos for side in ('minus','plus')
-                 if getattr(i,side+'_region')>=0}
-    result['fmm_kernel_orders']=[max(8,int(math.ceil(abs(k)*longest/2))+4)
-                                 for k in sorted(wavenumbers,key=lambda z:(z.real,z.imag))
-                                 if math.isfinite(abs(k))]
-    if 'geometric_near_pairs' not in result and mesh.elements:
-        from ghost_backend.twod.fmm.galerkin import near_pairs
-        from ghost_backend.twod.assembly.geometry_plan import AssemblyGeometry
-        result['geometric_near_pairs']=2*near_pairs(AssemblyGeometry(mesh),float('inf'),count_only=True)-len(mesh.elements)
-    from ghost_backend.twod.fmm.runtime import enabled as fmm_enabled
-    if not storage.get('analytic_zero') and (not sample_compression or fmm_enabled()):
-        from ghost_backend.twod.fmm.memory import geometry_resources
-        result['fmm_geometry']=geometry_resources(mesh,infos)
     from ghost_backend.compressed.runtime import enabled as compressed_enabled
     if sample_compression and compressed_enabled() and not storage.get('analytic_zero'):
         from ghost_backend.compressed.memory import geometry_storage
@@ -2171,19 +2125,6 @@ def solve_monostatic_rcs_2d_single_polarization(
         junction_stats["linear_element_count"] = int(len(mesh.elements))
 
 
-        from ghost_backend.execution.options import option
-        if option('discretization','galerkin')=='pulse':
-            from ghost_backend.twod.pulse.runtime import solve_fields as solve_pulse_fields
-            formulation_label='2D pulse midpoint collocation (piecewise-constant density)'
-            condition_diagnostics={} if compute_condition_number else None
-            rcs_lin_vec,amp_vec,pulse_residual=solve_pulse_fields(
-                mesh,coupled_infos,pol,k0,elevations_arr,condition_diagnostics)
-            rcs_db_vec=_rcs_db_from_sigma(rcs_lin_vec)
-            _consume_condition_estimate(cond_values,condition_diagnostics,formulation_label)
-            reused_matrix_solve_count+=len(elevations)
-            record_samples(rcs_lin_vec, rcs_db_vec, amp_vec,
-                           np.full(len(elevations), float(pulse_residual)), "Pulse")
-            continue
 
         if _is_all_sheet(coupled_infos):
             formulation_label = (
@@ -2469,13 +2410,6 @@ def solve_monostatic_rcs_2d_single_polarization(
     }
 
     if metadata.get('compressed_factors'):metadata['solver_method']='compressed_cpu'
-    if metadata.get('fmm_factors'):
-        metadata['solver_method']='pulse_fmm_gmres' if option('discretization','galerkin')=='pulse' else 'galerkin_fmm_gmres'
-    metadata['discretization']=option('discretization','galerkin')
-    if metadata['discretization']=='pulse':
-        metadata['basis']='piecewise_constant'
-        metadata['testing']='panel_midpoint_collocation'
-        metadata['pulse_pec_cfie']=option('pulse_pec_cfie',True)
     metadata["amplitude_version"] = RCS_AMPLITUDE_VERSION
     quality_gate = evaluate_quality_gate(metadata, thresholds=quality_thresholds)
     metadata["quality_gate"] = quality_gate
@@ -2722,7 +2656,6 @@ def _merge_co_polarized_2d_results(
         "channel_metadata": channel_metadata,
         "cpu_factorization_requested": first_metadata.get('cpu_factorization_requested', 'dense'),
         "compressed_factors": [v for m in channel_metadata.values() for v in m.get('compressed_factors',[])],
-        "fmm_factors": [v for m in channel_metadata.values() for v in m.get('fmm_factors',[])],
         "cpu_rhs_compression_requested": first_metadata.get('cpu_rhs_compression_requested', 'auto'),
         "hierarchical_factors": {label: channel_metadata[label].get('hierarchical_factors', []) for label in expected_channels},
         "sweep_compression": {label: channel_metadata[label].get('sweep_compression', []) for label in expected_channels},
@@ -3878,10 +3811,6 @@ def compute_boundary_densities(
     densities. Returns element-center positions, layer density, panel normals,
     and the formulation used for a single-frequency, single-angle debug solve.
     """
-
-    from ghost_backend.execution.options import option
-    if option('discretization','galerkin')=='pulse':
-        raise ValueError('Pulse boundary-density export is not yet available; use the monostatic field solver.')
 
     def check_abort() -> 'None':
         if abort_event is not None and abort_event.is_set():

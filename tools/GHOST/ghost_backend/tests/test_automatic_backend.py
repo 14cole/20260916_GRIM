@@ -7,7 +7,7 @@ import pytest
 
 sys.path[:0]=[str(Path(__file__).resolve().parents[2]),str(Path(__file__).resolve().parent)]
 from ghost_backend.execution.options import validate_options,execution_scope,current_options
-from ghost_backend.execution.policy import rank_candidates,native_fmm_available
+from ghost_backend.execution.policy import rank_candidates
 from ghost_backend.execution.selection import select_backend
 from ghost_backend.execution.errors import BackendNumericalError
 from ghost_backend.runs.batch import select_batch_backends
@@ -30,14 +30,13 @@ def test_default_auto_matches_reference_on_arbitrary_geometry(case):
     assert current_options() is None
 
 
-def test_rank_accounts_for_speed_memory_and_unavailable_native():
-    candidates=dict(dense=dict(cost=1.,peak_gb=4.),compressed=dict(cost=2.,peak_gb=2.),fmm=dict(cost=3.,peak_gb=.5))
-    with patch('ghost_backend.execution.policy.native_fmm_available',return_value=True):
-        assert rank_candidates(candidates,8)[0]=='dense'
-        assert rank_candidates(candidates,3)[0]=='compressed'
-        assert rank_candidates(candidates,1)[0]=='fmm'
-    with patch('ghost_backend.execution.policy.native_fmm_available',return_value=False):
-        with pytest.raises(MemoryError,match='No compatible backend fits'):rank_candidates(candidates,1)
+def test_rank_accounts_for_speed_and_memory():
+    candidates=dict(dense=dict(cost=1.,peak_gb=4.),compressed=dict(cost=2.,peak_gb=2.))
+    assert rank_candidates(candidates,8)[0]=='dense'
+    assert rank_candidates(candidates,3)[0]=='compressed'
+    with pytest.raises(MemoryError,match='No compatible backend fits'):rank_candidates(candidates,1)
+    with pytest.raises(ValueError,match='Invalid automatic backend'):
+        rank_candidates(dict(candidates,fmm=dict(cost=1.,peak_gb=1.)),8)
 
 
 def test_planner_forecasts_actual_polygon_mesh_without_coefficients():
@@ -50,51 +49,38 @@ def test_planner_forecasts_actual_polygon_mesh_without_coefficients():
     assert {'base','fine'}=={r['phase'] for r in result['meshes']}
 
 
-@pytest.mark.skipif(not native_fmm_available(),reason='Native FMM is optional')
-def test_auto_numerical_retry_preserves_accuracy_and_explicit_fmm_does_not_retry():
+def test_auto_numerical_retry_preserves_accuracy_and_explicit_compressed_does_not_retry():
     args=(fixture('reentrant',48),[1.],[0.,90.])
-    choice=dict(requested='adaptive',selected='fmm',retry_order=['dense'],reason='test fixture')
+    choice=dict(requested='adaptive',selected='compressed',retry_order=['dense'],reason='test fixture')
     with patch('ghost_backend.execution.selection.select_backend',return_value=choice), \
-         patch('ghost_backend.twod.fmm.factor.FMMFactor.solve',side_effect=BackendNumericalError('injected convergence failure')):
+         patch('ghost_backend.compressed.factor.CompressedFactor.solve',side_effect=BackendNumericalError('injected convergence failure')):
         result=solver.solve_monostatic_rcs_2d(*args,geometry_units='meters')
         with pytest.raises(BackendNumericalError):
-            solver.solve_monostatic_rcs_2d(*args,geometry_units='meters',solver_method='fmm')
+            solver.solve_monostatic_rcs_2d(*args,geometry_units='meters',
+                                           execution_options=dict(factorization='compressed'))
     reference=solver.solve_monostatic_rcs_2d(*args,geometry_units='meters',solver_method='direct')
     assert result['metadata']['backend_selection']['selected']=='dense'
-    assert result['metadata']['backend_selection']['initial_selection']=='fmm'
+    assert result['metadata']['backend_selection']['initial_selection']=='compressed'
     assert len(result['metadata']['backend_selection']['failed_attempts'])==1
     assert result['metadata']['execution_options']['factorization']=='dense'
     for pol in ('VV','HH'):np.testing.assert_allclose(fields(result,pol),fields(reference,pol),rtol=1e-8,atol=1e-12)
 
 
-@pytest.mark.skipif(not native_fmm_available(),reason='Native FMM is optional')
 def test_cancellation_is_never_retried():
-    choice=dict(requested='adaptive',selected='fmm',retry_order=['dense'],reason='test fixture')
+    choice=dict(requested='adaptive',selected='compressed',retry_order=['dense'],reason='test fixture')
     with patch('ghost_backend.execution.selection.select_backend',return_value=choice), \
-         patch('ghost_backend.twod.fmm.factor.FMMFactor.solve',side_effect=InterruptedError('canceled')), \
+         patch('ghost_backend.compressed.factor.CompressedFactor.solve',side_effect=InterruptedError('canceled')), \
          patch('ghost_backend.linalg.dense.DenseFactor',side_effect=AssertionError('unexpected retry')):
         with pytest.raises(InterruptedError):
             solver.solve_monostatic_rcs_2d(fixture('rectangle',48),[1.],[0.],geometry_units='meters')
 
 
-def test_hpc_fmm_choice_and_retry_stay_inside_the_unit_memory_reservation():
+def test_hpc_compressed_choice_and_retry_stay_inside_the_unit_memory_reservation():
     records=[dict(unit=str(i),backend_candidates=dict(dense=dict(cost=10.,peak_gb=7.),
-             compressed=dict(cost=14.,peak_gb=4.),fmm=dict(cost=16.,peak_gb=1.))) for i in range(4)]
-    with patch('ghost_backend.execution.policy.native_fmm_available',return_value=True):
-        choices,summary=select_batch_backends(records,4,4,4,validate_options(dict(assembly_threads=1)))
-    assert summary['fmm_units']==4
-    assert all(v['selected']=='fmm' and not v['retry_order'] for v in choices.values())
-
-
-def test_native_fmm_is_checked_on_execution_node():
-    record=dict(unit='a',backend_candidates=dict(dense=dict(cost=10.,peak_gb=2.),fmm=dict(cost=1.,peak_gb=1.)))
-    with patch('ghost_backend.execution.policy.native_fmm_available',return_value=False):
-        choices,_=select_batch_backends([record],1,1,4,validate_options({}))
-    assert choices['a']['selected']=='dense'
-    with patch('ghost_backend.execution.policy.native_fmm_available',return_value=False):
-        record['backend_candidates'].pop('dense')
-        with pytest.raises(RuntimeError,match='No compatible backend'):
-            select_batch_backends([record],1,1,4,validate_options({}))
+             compressed=dict(cost=14.,peak_gb=3.))) for i in range(4)]
+    choices,summary=select_batch_backends(records,4,4,4,validate_options(dict(assembly_threads=1)))
+    assert summary['compressed_units']==4
+    assert all(v['selected']=='compressed' and not v['retry_order'] for v in choices.values())
 
 
 def test_execution_reservation_survives_nested_profiles_and_restores():

@@ -55,7 +55,7 @@ class DirectSolverMethodTests(unittest.TestCase):
     def test_private_formulations_also_reject_retired_method(self):
         for solver in (rcs._solve_te_robin_mfie, rcs._solve_multi_region_indirect):
             with self.subTest(solver=solver.__name__):
-                with self.assertRaisesRegex(ValueError, "public monostatic entry point"):
+                with self.assertRaisesRegex(ValueError, "auto.*direct"):
                     solver(None, [], "TE", 1.0, [0.0], solver_method="fmm")
 
     def test_auto_and_direct_reach_geometry_preflight(self):

@@ -5,10 +5,6 @@ from ghost_backend.linalg.dense import DenseFactor
 
 
 def solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label, **kwargs):
-    from ghost_backend.twod.fmm.system import FMMSystem
-    if isinstance(matrix, FMMSystem):
-        # FMM matvecs run their own native threads alongside BLAS.
-        return _solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label, **kwargs)
     from ghost_backend.execution.options import linear_algebra_threads
     with linear_algebra_threads():
         return _solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label, **kwargs)
@@ -30,9 +26,6 @@ def _solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
     hierarchical = factor_mode() != 'dense'
     from ghost_backend.compressed.operator import StreamedOperator
     compressed=isinstance(matrix,StreamedOperator)
-    from ghost_backend.twod.fmm.system import FMMSystem
-    from ghost_backend.twod.fmm.factor import FMMFactor
-    fmm=isinstance(matrix,FMMSystem)
     if compressed:coordinates=matrix.coordinates
     if requested == 'gpu' and hierarchical:
         raise ValueError('Hierarchical factorization requires the CPU dense backend.')
@@ -43,16 +36,13 @@ def _solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
     gpu = (not hierarchical and state is None and diagnostics is None and rcs.requested_precision() != 'mixed'
            and (requested == 'gpu' or requested == 'auto' and len(matrix) >= threshold))
     batch_size = len(angles) if gpu else configured_batch_size()
-    if fmm:
-        from ghost_backend.twod.fmm.memory import rhs_batch_size
-        batch_size=rhs_batch_size(len(matrix),batch_size)
     if coordinates is None and len(matrix) in (len(mesh.nodes), 2*len(mesh.nodes)):
         xy = np.zeros((len(mesh.nodes), 2))
         for element in mesh.elements:
             xy[list(element.node_ids)] = [mesh.nodes[i].xy for i in element.node_ids]
         coordinates = np.tile(xy, (len(matrix)//len(mesh.nodes), 1))
     from ghost_backend.compressed.factor import CompressedFactor
-    factor_class=FMMFactor if fmm else CompressedFactor if compressed else DenseFactor
+    factor_class=CompressedFactor if compressed else DenseFactor
     factor = None if gpu else factor_class(matrix, diagnostics, label,
         evidence=state.systems if state is not None else None, checkpoint=checkpoint,
         force_double=state is not None, coordinates=coordinates)
@@ -64,7 +54,7 @@ def _solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
         solve as solve_sweep,
         mode as compression_mode,
     )
-    sweep_basis = (SweepBasis(batch_size) if factor is not None and not fmm and len(angles) >= 32
+    sweep_basis = (SweepBasis(batch_size) if factor is not None and len(angles) >= 32
                    and compression_mode() != 'off' else None)
     for start in range(0, len(angles), batch_size):
         if checkpoint is not None:
@@ -76,7 +66,7 @@ def _solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
             solution = rcs._solve_dense_system(matrix, rhs, diagnostics, label, residual_diagnostics=evidence)
             relative = evidence['relative_residual']
         else:
-            solution = factor.solve(rhs) if fmm else solve_sweep(factor, rhs, sweep_basis)
+            solution = solve_sweep(factor, rhs, sweep_basis)
             relative = factor.relative_residual
         max_residual = max(max_residual, float(np.max(relative)))
         density = solution[:len(mesh.nodes)] if density_builder is None else density_builder(solution)

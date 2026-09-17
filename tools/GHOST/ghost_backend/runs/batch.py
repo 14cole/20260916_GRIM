@@ -130,8 +130,7 @@ def select_batch_backends(records, cores, workers, budget_gb, options):
         dense_first_cost=scores[0], fastest_unit_first_cost=scores[0],
         compressed_first_cost=scores[1], selected_cost=best_score,
         dense_units=sum(v == 'dense' for v in best.values()),
-        compressed_units=sum(v == 'compressed' for v in best.values()),
-        fmm_units=sum(v == 'fmm' for v in best.values()),optimality_guaranteed=False)
+        compressed_units=sum(v == 'compressed' for v in best.values()),optimality_guaranteed=False)
     selections = {}
     for r in records:
         name = r['unit']
@@ -158,8 +157,8 @@ def apply_batch_choices(records, cores, workers, budget, options):
             r.update(r['backend_candidates'][selection['selected']])
         resolved.append(r)
     if summary:
-        print('  Auto batch: {} dense, {} compressed, {} FMM; predicted completion cost {:.3g} '
+        print('  Auto batch: {} dense, {} compressed; predicted completion cost {:.3g} '
               '(fastest-unit-first {:.3g}, compressed-first {:.3g}); {} CPUs, {:.1f} GiB budget'.format(
-                  summary['dense_units'], summary['compressed_units'], summary['fmm_units'], summary['selected_cost'],
+                  summary['dense_units'], summary['compressed_units'], summary['selected_cost'],
                   summary['dense_first_cost'], summary['compressed_first_cost'], cores, budget), flush=True)
     return resolved, selections, summary

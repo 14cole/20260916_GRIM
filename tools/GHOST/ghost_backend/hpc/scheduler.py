@@ -289,8 +289,6 @@ def _resource_records_for_frequency(
             if any(i.bc_kind == 'thin_layer' for i in infos) else None,
             sample_compression=False,
         )
-        from ghost_backend.execution.policy import fmm_eligibility
-        resources['fmm_eligible'],resources['fmm_exclusion']=fmm_eligibility(resources,mesh,infos)
         records[requested_pol] = {
             "panels": int(len(panels)),
             **resources,
@@ -391,8 +389,7 @@ def predict_2d_resources_many(
                 raise RuntimeError(
                     "base/fine resource planning selected different formulations"
                 )
-            modes = (('dense','compressed','fmm') if base['fmm_eligible'] and fine['fmm_eligible'] else
-                     ('dense','compressed')) if settings is not None and settings['factorization'] == 'adaptive' else (None,)
+            modes = ('dense','compressed') if settings is not None and settings['factorization'] == 'adaptive' else (None,)
             estimates = {}
             for mode in modes:
                 if mode is None:
@@ -455,9 +452,7 @@ def _mesh_peak_estimates(solver, base, fine, n_angles, method, safety, floor):
             operator_matrices=resources['operator_matrices'], dense_resources=resources,
             n_rhs=max(1, int(n_angles)), solver_method=method, formulation=resources['formulation'])
         memory = None
-        if resources.get('memory_estimate',{}).get('method') == 'fmm_workspace_allowance':
-            memory=dict(resources['memory_estimate'],peak_bytes=int((floor+safety*estimate)*1024**3))
-        elif 'memory_estimate' in resources:
+        if 'memory_estimate' in resources:
             memory = forecast(resources['nodes'], resources['system_dofs'], max(1, int(n_angles)),
                 min(configured_batch_size(), max(1, int(n_angles))), get_assembly_threads(),
                 storage_budget(), resources, float(safety), float(floor))

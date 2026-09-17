@@ -112,23 +112,11 @@ class PolynomialBasisTests(unittest.TestCase):
             for a, b in zip(pair_a, pair_b):
                 np.testing.assert_array_equal(a, b)
 
-    def test_fmm_matches_dense_polynomial_operators(self):
-        from ghost_backend.twod.fmm.galerkin import GalerkinKernel
-        rng = np.random.default_rng(44)
-        for degree in (2, 3):
-            mesh = mesh_for(fixture('rectangle', 24), degree)
-            kernel = GalerkinKernel(mesh, 42.-2j)
-            single, kp = s._assemble_linear_operator_matrices(mesh, 42.-2j, True)
-            w = s._assemble_linear_hypersingular_matrix(mesh, 42.-2j)
-            x = rng.normal(size=(len(mesh.nodes), 2)) + 1j*rng.normal(size=(len(mesh.nodes), 2))
-            for kind, matrix in (('S', single), ('KP', kp), ('K', kp.T), ('W', w)):
-                np.testing.assert_allclose(kernel.apply(kind, x), matrix@x, rtol=2e-7, atol=3e-10)
-
-    def test_dense_compressed_fmm_material_and_sheet_solutions(self):
+    def test_dense_and_compressed_material_and_sheet_solutions(self):
         for degree in (2, 3):
             for case in ('dielectric', 'mixed', 'sheet'):
                 results = []
-                for mode in ('dense', 'compressed', 'fmm'):
+                for mode in ('dense', 'compressed'):
                     result = s.solve_monostatic_rcs_2d(fixture(case, 24), [1.], [0., 47., 93.],
                         geometry_units='meters', compute_condition_number=True,
                         execution_options=dict(basis_order=degree, factorization=mode))

@@ -213,7 +213,7 @@ class PipelinePerformanceTests(unittest.TestCase):
                         plan=predict_2d_resources_many(str(path),[.6],['VV','HH'],'meters',10000,
                             fine_factor=1.5,n_angles=3,solver_method='experimental_cpu')
                 memory.assert_not_called()
-                self.assertTrue(all(set(r['backend_candidates']) == {'dense', 'compressed', 'fmm'} for r in plan.values()))
+                self.assertTrue(all(set(r['backend_candidates']) == {'dense', 'compressed'} for r in plan.values()))
                 self.assertTrue(all(r['peak_gb']>0 and r['fine_nodes']>r['nodes'] for r in plan.values()))
                 forecasts.append(plan)
             self.assertEqual(forecasts[0], forecasts[1])

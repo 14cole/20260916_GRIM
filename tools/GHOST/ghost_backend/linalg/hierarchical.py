@@ -14,8 +14,8 @@ class HierarchicalRejected(BackendNumericalError):
 
 def factor_mode():
     value = environment_value('GHOST_CPU_FACTORIZATION', 'dense').strip().lower()
-    if value not in ('dense', 'hierarchical', 'auto', 'compressed', 'fmm'):
-        raise ValueError('GHOST_CPU_FACTORIZATION must be dense, hierarchical, auto, compressed, or fmm.')
+    if value not in ('dense', 'hierarchical', 'auto', 'compressed'):
+        raise ValueError('GHOST_CPU_FACTORIZATION must be dense, hierarchical, auto, or compressed.')
     return value
 
 

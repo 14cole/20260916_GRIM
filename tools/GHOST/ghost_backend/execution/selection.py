@@ -2,7 +2,7 @@
 import math
 from ghost_backend.execution.options import execution_scope, validate_options
 from ghost_backend.execution.runtime import ScopedValue
-from ghost_backend.execution.policy import MODEL, BACKENDS, relative_cost, fmm_eligibility, rank_candidates, native_fmm_available
+from ghost_backend.execution.policy import MODEL, BACKENDS, relative_cost, rank_candidates
 
 _BATCH_SELECTION = ScopedValue('ghost_batch_backend_selection', default=None)
 
@@ -77,13 +77,8 @@ def select_backend(arguments, options, certified=False, checkpoint=None):
                         coupled = s._build_linear_coupled_infos(mesh, materials, freq, pol, k0)
                         layer = s.layer_for_mesh(mesh, materials, freq) if any(i.bc_kind == 'thin_layer' for i in coupled) else None
                         resources = s._dense_formulation_resources(mesh, coupled, pol, layer, sample_compression=False)
-                        eligible,why=fmm_eligibility(resources,mesh,coupled)
-                        if not eligible:
-                            exclusions['fmm']=why
                         peaks={}
                         for mode in BACKENDS:
-                            if mode == 'fmm' and not eligible:
-                                continue
                             with execution_scope(dict(dense,factorization=mode)):
                                 measured=dict(resources)
                                 peaks[mode]=s._estimate_memory_gb(resources['nodes'], False,
@@ -96,8 +91,6 @@ def select_backend(arguments, options, certified=False, checkpoint=None):
                             polynomial_degree=degree, panels=len(panels), unknowns=resources['system_dofs'], dense_peak_gib=peaks['dense'],
                             formulation=resources['formulation'],backend_peak_gib=peaks))
     peak = max(r['dense_peak_gib'] for r in records)
-    if not native_fmm_available():
-        exclusions['fmm']='The native FMM library is unavailable on this execution host.'
     candidates={m:c for m,c in candidates.items() if m not in exclusions}
     try:
         ranked=rank_candidates(candidates,budget)

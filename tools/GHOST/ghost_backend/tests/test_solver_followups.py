@@ -45,50 +45,6 @@ def test_numpy_bistatic_sequences():
     assert len(result['co_solved_samples']['VV'])==4
 
 
-def test_fmm_forecast_accounts_for_material_quadrature_fill_and_coarse_work():
-    from ghost_backend.twod.fmm.memory import forecast
-    resources=dict(panels=1000,geometric_near_pairs=7000,fmm_kernel_orders=[8])
-    a=forecast(1000,2000,1,32,64*1024**2,resources)
-    b=forecast(1000,2000,2,32,64*1024**2,dict(resources,fmm_kernel_orders=[8,32]))
-    assert a['peak_bytes']==sum(a['components'].values())
-    assert b['peak_bytes']>a['peak_bytes']
-    assert a['components']['sparse_preconditioner_peak_bytes']>0
-    assert a['components']['coarse_workspace_bytes']>0
-    assert b['quadrature_points']==40000
-
-
-def test_spatial_coarse_preconditioner_and_adjoint():
-    from scipy.sparse import eye
-    from scipy.sparse.linalg import LinearOperator
-    from ghost_backend.twod.fmm.factor import FMMFactor
-    class Operator(LinearOperator):
-        def __init__(self,a):
-            super().__init__(dtype=np.dtype(complex),shape=a.shape)
-            self.matrix=a; self.kernels=[]
-        def __len__(self):return len(self.matrix)
-        def _matvec(self,x):return self.matrix@x
-        def _rmatvec(self,x):return self.matrix.conj().T@x
-        def sparse_near(self):return eye(len(self),dtype=complex,format='csc')
-        def report(self):return {}
-    rng=np.random.default_rng(98);n=128
-    u=rng.normal(size=(n,4))+1j*rng.normal(size=(n,4))
-    a=np.eye(n)+.01*u@u.conj().T
-    factor=FMMFactor(Operator(a),coordinates=rng.random((n,2)))
-    x=rng.normal(size=n)+1j*rng.normal(size=n)
-    y=rng.normal(size=n)+1j*rng.normal(size=n)
-    factor.solve(x)
-    previous=factor.pre,factor.preh,list(factor.recycled)
-    assert factor._coarse_correction()
-    assert factor.recycled and all(product is None for _,product in factor.recycled)
-    np.testing.assert_allclose(np.vdot(y,factor.pre@x),np.vdot(factor.preh@y,x),rtol=1e-12,atol=1e-12)
-    np.testing.assert_allclose(a@factor.solve(x),x,rtol=1e-8,atol=1e-9)
-    # With no remaining illumination, a trial cannot repay setup. Its solution
-    # remains valid, and both original preconditioners and cached products return.
-    assert factor.pre is previous[0] and factor.preh is previous[1]
-    assert not factor.details['coarse_trial_accepted']
-    np.testing.assert_allclose(a@factor.solve(y),y,rtol=1e-8,atol=1e-9)
-
-
 def test_measured_history_needs_repetition_and_respects_worker_ram(tmp_path,monkeypatch):
     from ghost_backend.execution import timing_history as history
     monkeypatch.setenv('GHOST_TIMING_CACHE_DIR',str(tmp_path))
@@ -105,7 +61,7 @@ def test_measured_history_needs_repetition_and_respects_worker_ram(tmp_path,monk
     choice['selected']='compressed'
     for _ in range(5):history.record('case','dense',.1,valid)
     assert history.adjust(choice,'case',batch=True)['selected']=='compressed'
-    history.record('bad','fmm',1.,dict(quality_gate=dict(passed=False)))
+    history.record('bad','dense',1.,dict(quality_gate=dict(passed=False)))
     assert 'bad' not in history.read()
     history.cache_path().write_text('{broken')
     assert history.adjust(choice,'case')['selected']=='compressed'
@@ -121,7 +77,7 @@ def test_timing_request_identity_changes_with_angles_precision_and_settings():
     base=request_key(arguments,options,'solve_monostatic_rcs_2d')
     assert len(base)==64
     assert request_key(dict(arguments,elevations_deg=[0.,45.]),options,'solve_monostatic_rcs_2d')!=base
-    assert request_key(arguments,dict(options,fmm_solver_tolerance=1e-10),'solve_monostatic_rcs_2d')!=base
+    assert request_key(arguments,dict(options,far_quadrature_order=12),'solve_monostatic_rcs_2d')!=base
     with linear_precision('mixed'):
         assert request_key(arguments,options,'solve_monostatic_rcs_2d')!=base
 

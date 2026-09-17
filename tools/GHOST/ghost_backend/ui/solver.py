@@ -76,7 +76,7 @@ def _2d_panel_limit() -> 'int':
     from ghost_backend.compressed.runtime import enabled
     from ghost_backend.twod.constants import MAX_PANELS_DEFAULT
     from ghost_backend.execution.options import option
-    return 100_000 if enabled() or option('factorization') in ('adaptive','fmm') else MAX_PANELS_DEFAULT
+    return 100_000 if enabled() or option('factorization') == 'adaptive' else MAX_PANELS_DEFAULT
 
 
 def _result_kind(result: 'Dict[str, Any]') -> 'str':
@@ -1455,7 +1455,7 @@ class SolverTab(RunSetupMixin, QWidget):
         for control in (self.save_run_setup_button, self.load_run_setup_button, self.run_preflight_button):
             control.setEnabled(not busy)
         self._sync_export_state()
-        self.btn_currents.setEnabled(not busy and not is_bor and self.execution_options_widget.basis_combo.currentData()!='pulse')
+        self.btn_currents.setEnabled(not busy and not is_bor)
         self.btn_browse_geo.setEnabled(not busy)
         self.btn_use_tab.setEnabled(not busy)
         self.btn_browse_output.setEnabled(not busy)
@@ -1478,7 +1478,7 @@ class SolverTab(RunSetupMixin, QWidget):
             self.cmb_solver_method.setCurrentIndex(self.cmb_solver_method.findData('direct'))
         if method_available and self.execution_options_widget.factor_combo.currentData() == 'adaptive':
             self.cmb_solver_method.setCurrentIndex(self.cmb_solver_method.findData('auto'))
-        if method_available and self.execution_options_widget.factor_combo.currentData() in ('compressed', 'fmm'):
+        if method_available and self.execution_options_widget.factor_combo.currentData() == 'compressed':
             self.cmb_solver_method.setCurrentIndex(self.cmb_solver_method.findData('experimental_cpu'))
         if self.execution_options_widget.factor_combo.currentData() != 'dense':
             self.cmb_lu_precision.setCurrentIndex(self.cmb_lu_precision.findData('double'))
@@ -1492,16 +1492,12 @@ class SolverTab(RunSetupMixin, QWidget):
         self.execution_options_widget.setEnabled(not busy and not is_bor)
         self.bor_options_widget.setEnabled(not busy and is_bor)
         factor_widget.setEnabled(not busy and method_available)
-        self.cmb_solver_method.setEnabled(not busy and method_available and factor not in ('compressed', 'adaptive','fmm'))
+        self.cmb_solver_method.setEnabled(not busy and method_available and factor not in ('compressed', 'adaptive'))
         self.execution_options_widget.mesh_combo.setEnabled(not busy and method_available)
-        self.execution_options_widget.basis_combo.setEnabled(not busy and method_available)
         if not is_bor and not method_available:
             combo = self.execution_options_widget.mesh_combo
             combo.setCurrentIndex(combo.findData('global'))
-            self.execution_options_widget.basis_combo.setCurrentIndex(0)
-        pulse=self.execution_options_widget.basis_combo.currentData()=='pulse'
-        if pulse:self.cmb_lu_precision.setCurrentIndex(self.cmb_lu_precision.findData('double'))
-        self.cmb_lu_precision.setEnabled(not busy and not experimental and not pulse and factor == 'dense')
+        self.cmb_lu_precision.setEnabled(not busy and not experimental and factor == 'dense')
         self.btn_advanced_settings.setEnabled(not busy)
         self.edit_quality_residual_max.setEnabled(enable_2d_quality_thresholds)
         self.edit_quality_condition_max.setEnabled(enable_2d_quality_thresholds)

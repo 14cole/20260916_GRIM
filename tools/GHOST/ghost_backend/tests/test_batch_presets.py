@@ -31,13 +31,8 @@ class BatchPresetTests(unittest.TestCase):
         cases = [
             ([unit('small', 2, 1)], 'dense'),
             ([unit(str(i), 7, 2) for i in range(4)], 'compressed'),
-            ([dict(unit='fmm', backend_candidates=dict(
-                dense=dict(peak_gb=2., cost=10.),
-                compressed=dict(peak_gb=1., cost=14.),
-                fmm=dict(peak_gb=1., cost=2.)))], 'fmm'),
         ]
-        with mock.patch('ghost_backend.runs.batch.math', legacy_math), \
-                mock.patch('ghost_backend.execution.policy.native_fmm_available', return_value=True):
+        with mock.patch('ghost_backend.runs.batch.math', legacy_math):
             for records, expected in cases:
                 with self.subTest(expected=expected):
                     choices, summary = select_batch_backends(records, 4, 4, 8, options)
@@ -144,7 +139,7 @@ class BatchPresetTests(unittest.TestCase):
             self.assertEqual(mesh.call_count, 4)  # one base/fine topology per frequency
             self.assertEqual(len(plans), 4)
             for p in plans.values():
-                self.assertEqual(set(p['backend_candidates']), {'dense', 'compressed','fmm'})
+                self.assertEqual(set(p['backend_candidates']), {'dense', 'compressed'})
                 self.assertFalse(p['backend_candidates']['compressed']['memory_estimate']['sampled'])
                 self.assertGreater(p['peak_gb'], 0)
 

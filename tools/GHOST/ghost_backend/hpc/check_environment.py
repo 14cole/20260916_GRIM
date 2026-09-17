@@ -57,9 +57,6 @@ def main():
         if not np.isfinite(residual) or residual > 1e-12:
             raise RuntimeError('Complex LU check failed: residual {}'.format(residual))
         print('PASS: driver/solver imports and complex LU (residual {:.3g}).'.format(residual))
-        from ghost_backend.execution.policy import native_fmm_available
-        print('Automatic FMM candidate: {}.'.format('available' if native_fmm_available() else
-              'unavailable; automatic selection uses dense/compressed'))
     except Exception as exc:
         print('FAIL: {}: {}'.format(type(exc).__name__, exc))
         return 1
