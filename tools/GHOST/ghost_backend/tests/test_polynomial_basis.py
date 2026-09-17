@@ -72,6 +72,46 @@ class PolynomialBasisTests(unittest.TestCase):
             np.testing.assert_allclose(actual[0]/1e-16, expected[0], rtol=2e-9, atol=1e-13)
             np.testing.assert_allclose(actual[1]/1e-8, expected[1], rtol=2e-9, atol=1e-13)
 
+    def test_batched_near_blocks_match_recursive_reference(self):
+        import copy
+        from ghost_backend.twod.polynomial_quadrature import near_block, near_blocks, moment_cache_scope
+        meshes = {degree: mesh_for(fixture('rectangle', 16), degree) for degree in (2, 3)}
+        for degree, mesh in meshes.items():
+            elements = mesh.elements
+            pairs = [(elements[i], elements[j]) for i in range(len(elements)) for j in range(len(elements))
+                     if np.linalg.norm(elements[i].center - elements[j].center)
+                     < 3 * max(elements[i].length, elements[j].length)]
+            # Nearly coincident parallel panels exercise interval bisection.
+            close = copy.deepcopy(elements[3])
+            close.p0 = close.p0 + .04 * close.length * close.normal
+            close.p1 = close.p1 + .04 * close.length * close.normal
+            close.center = close.center + .04 * close.length * close.normal
+            close.panel_index = -1
+            pairs += [(elements[3], close), (close, elements[4])]
+            kinds = {('same' if o.panel_index == s.panel_index else 'other') for o, s in pairs}
+            self.assertEqual(kinds, {'same', 'other'})
+            for k in (37.5, 51 - 7j, 420.8 - 204.6j):
+                for derivative in (True, False):
+                    serial = near_blocks(pairs, k, derivative, threads=1)
+                    self.assertTrue(all(np.array_equal(a, b) for pair_a, pair_b in
+                                        zip(serial, near_blocks(pairs, k, derivative, threads=3))
+                                        for a, b in zip(pair_a, pair_b)))
+                    for (obs, src), actual in zip(pairs, serial):
+                        reference = near_block(obs, src, k, derivative)
+                        scale = max(np.max(abs(reference[0])), np.max(abs(reference[1])))
+                        for a, b in zip(actual, reference):
+                            self.assertLess(np.max(abs(a - b)), 1e-11 * scale, (degree, k, derivative))
+        # Cubic panels reuse quadratic moments without changing the cubic blocks.
+        quadratic, cubic = meshes[2].elements[:6], meshes[3].elements[:6]
+        uncached = near_blocks(list(zip(cubic, cubic[1:])), 51 - 7j)
+        with moment_cache_scope() as cache:
+            near_blocks(list(zip(quadratic, quadratic[1:])), 51 - 7j)
+            reused = near_blocks(list(zip(cubic, cubic[1:])), 51 - 7j)
+            self.assertGreater(cache.hits, 0)
+        for pair_a, pair_b in zip(uncached, reused):
+            for a, b in zip(pair_a, pair_b):
+                np.testing.assert_array_equal(a, b)
+
     def test_fmm_matches_dense_polynomial_operators(self):
         from ghost_backend.twod.fmm.galerkin import GalerkinKernel
         rng = np.random.default_rng(44)

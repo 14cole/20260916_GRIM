@@ -4,7 +4,17 @@ from ghost_backend.execution.cpu import current_state, configured_batch_size
 from ghost_backend.linalg.dense import DenseFactor
 
 
-def solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
+def solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label, **kwargs):
+    from ghost_backend.twod.fmm.system import FMMSystem
+    if isinstance(matrix, FMMSystem):
+        # FMM matvecs run their own native threads alongside BLAS.
+        return _solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label, **kwargs)
+    from ghost_backend.execution.options import linear_algebra_threads
+    with linear_algebra_threads():
+        return _solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label, **kwargs)
+
+
+def _solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
                  potential='SLP', density_builder=None, observation_angles=None,
                  element_mask=None, order=8, return_density=False, project=True,
                  second_potential=None, coordinates=None, second_density_builder=None, adaptive_routes=None):

@@ -264,6 +264,33 @@ def execution_scope(value, limit_blas=False, assembly_threads=None, memory_budge
                 yield checked
 
 
+@contextmanager
+def linear_algebra_threads():
+    """Let native BLAS use the solve's whole CPU reservation during factorization.
+
+    Schedulers reserve max(blas_threads, assembly threads) cores per solve, and
+    the assembly threads are idle once the operator exists. A solve without a
+    scheduler reservation (the desktop solver runs one at a time) may use every
+    host core. BLAS is only ever widened here, never narrowed, so an
+    unrestricted caller keeps its pool.
+    """
+    active = _ACTIVE.get()
+    if active is None:
+        yield None
+        return
+    target = max(int(active['blas_threads']), int(effective_assembly_threads(1)))
+    if _ASSEMBLY_ALLOCATION.get() is None:
+        target = max(target, os.cpu_count() or 1)
+    from ghost_backend.execution.thread_control import threadpool_info, threadpool_limits
+    current = [row.get('num_threads') for row in threadpool_info() if row.get('user_api') == 'blas']
+    if not current or min(current) >= target:
+        yield None
+        return
+    with _BLAS_LOCK:
+        with threadpool_limits(limits=target, user_api='blas'):
+            yield target
+
+
 def configured_execution(function):
     """Accept execution_options at public solver entry points."""
     signature = inspect.signature(function)

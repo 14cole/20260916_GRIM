@@ -244,12 +244,22 @@ def _integrate_linear_pairs_box_sk_batched(
     dist = np.sqrt(np.sum(diff * diff, axis=3))
     dist_safe = np.maximum(dist, EPS)
     kr = np.asarray(complex(k0) * dist_safe, dtype=np.complex128)
-    kr[np.abs(kr) <= 1e-12] = 1e-12 + 0.0j
+    tiny = np.abs(kr) <= 1e-12
     w_outer = np.outer(weights, weights)
+    green = derivative = None
+    if not np.any(tiny):
+        # Validated screened tables (lossy media) or real Bessel functions; the
+        # scaled complex Hankel routine remains the reference fallback.
+        from ghost_backend.twod.polynomial_quadrature import _kernels, _table_for
+        table = _table_for(k0, list(zip(obs_elems, src_elems)))
+        green, derivative = _kernels(k0, dist_safe, bool(compute_double_layer), table)
+    else:
+        kr[tiny] = 1e-12 + 0.0j
 
     if compute_single_layer:
-        h0 = _hankel2_0_array(kr.reshape(-1)).reshape(dist.shape)
-        weighted_g = w_outer[None, :, :] * (0.25j * h0)
+        if green is None:
+            green = 0.25j * _hankel2_0_array(kr.reshape(-1)).reshape(dist.shape)
+        weighted_g = w_outer[None, :, :] * green
         s_blocks = np.einsum(
             'pij,ia,jb->pab', weighted_g, phi, phi
         )
@@ -257,7 +267,8 @@ def _integrate_linear_pairs_box_sk_batched(
         s_blocks = zero.copy()
 
     if compute_double_layer:
-        h1 = _hankel2_1_array(kr.reshape(-1)).reshape(dist.shape)
+        if derivative is None:
+            derivative = (0.25j * complex(k0)) * _hankel2_1_array(kr.reshape(-1)).reshape(dist.shape)
         if obs_normal_deriv:
             normals = np.asarray(
                 [elem.normal for elem in obs_elems], dtype=float
@@ -265,7 +276,7 @@ def _integrate_linear_pairs_box_sk_batched(
             proj = np.sum(
                 diff * normals[:, None, None, :], axis=3
             ) / dist_safe
-            dk_vals = (-0.25j * complex(k0)) * h1 * proj
+            dk_vals = -derivative * proj
         else:
             normals = np.asarray(
                 [elem.normal for elem in src_elems], dtype=float
@@ -273,7 +284,7 @@ def _integrate_linear_pairs_box_sk_batched(
             proj = np.sum(
                 diff * normals[:, None, None, :], axis=3
             ) / dist_safe
-            dk_vals = (0.25j * complex(k0)) * h1 * proj
+            dk_vals = derivative * proj
         dk_vals[dist <= EPS] = 0.0
         k_blocks = np.einsum(
             'pij,ia,jb->pab', w_outer[None, :, :] * dk_vals, phi, phi
@@ -1044,6 +1055,8 @@ def _hypersingular_block_from_s_block(
 
 _ASSEMBLY_TILE_TARGET_BYTES = 24 * 1024 * 1024
 _NEAR_BATCH_MAX_SAMPLES = 1_000_000
+# Concurrent near batches keep the former single-batch working set in total.
+_NEAR_BATCH_THREAD_SAMPLES = 250_000
 
 
 def _env_positive_int(name: 'str', default: 'int') -> 'int':
@@ -1947,26 +1960,49 @@ def _assemble_linear_operator_matrices_multi(
     )
 
     fixed_blocks: 'Dict[int, Tuple[np.ndarray, np.ndarray]]' = {}
+    batches = []
     for tensor_order, positions in fixed_positions_by_order.items():
-
-        batch_pairs = max(1, _NEAR_BATCH_MAX_SAMPLES // max(1, tensor_order * tensor_order))
+        # Batch boundaries do not depend on the thread count, so threaded and
+        # serial assembly integrate identical batches.
+        batch_pairs = max(1, _NEAR_BATCH_THREAD_SAMPLES // max(1, tensor_order * tensor_order))
         for start in range(0, len(positions), batch_pairs):
-            selected = positions[start:start + batch_pairs]
-            selected_arr = np.asarray(selected, dtype=np.int64)
-            s_batch, k_batch = _integrate_linear_pairs_box_sk_batched(
-                elements,
-                obs_idx[selected_arr],
-                src_idx[selected_arr],
-                k0,
-                obs_normal_deriv,
-                tensor_order,
-                compute_single_layer=compute_single_layer,
-                compute_double_layer=want_k,
+            batches.append((tensor_order, positions[start:start + batch_pairs]))
+
+    def _fixed_batch(batch):
+        tensor_order, selected = batch
+        selected_arr = np.asarray(selected, dtype=np.int64)
+        return _integrate_linear_pairs_box_sk_batched(
+            elements,
+            obs_idx[selected_arr],
+            src_idx[selected_arr],
+            k0,
+            obs_normal_deriv,
+            tensor_order,
+            compute_single_layer=compute_single_layer,
+            compute_double_layer=want_k,
+        )
+
+    from ghost_backend.twod.polynomial_quadrature import map_checked, solve_checkpoint
+    near_workers = min(get_assembly_threads(), len(batches),
+                       max(1, _NEAR_BATCH_MAX_SAMPLES // _NEAR_BATCH_THREAD_SAMPLES))
+    batch_results = map_checked(_fixed_batch, batches, near_workers, solve_checkpoint())
+    for (_, selected), (s_batch, k_batch) in zip(batches, batch_results):
+        for local, original_pos in enumerate(selected):
+            fixed_blocks[int(original_pos)] = (
+                s_batch[local], k_batch[local]
             )
-            for local, original_pos in enumerate(selected):
-                fixed_blocks[int(original_pos)] = (
-                    s_batch[local], k_batch[local]
-                )
+    batch_results = None
+
+    if width > 2:
+        # Polynomial self, touching and adaptive pairs share batched stages.
+        from ghost_backend.twod.polynomial_quadrature import near_blocks
+        remaining = [pos for pos in range(obs_idx.size) if pos not in fixed_blocks]
+        blocks = near_blocks([(elements[int(obs_idx[pos])], elements[int(src_idx[pos])]) for pos in remaining],
+                             k0, obs_normal_deriv)
+        for pos, (s_blk, k_blk) in zip(remaining, blocks):
+            fixed_blocks[pos] = (s_blk if compute_single_layer else np.zeros_like(s_blk),
+                                 k_blk if want_k else np.zeros_like(k_blk))
+        blocks = None
 
     last_obs = -1
     obs_elem = None

@@ -67,6 +67,16 @@ def observe(mesh, solution, density, routes=None):
 
 def run_certified(low_level_solver, geometry_snapshot, solver_kwargs,
                   mesh_convergence_policy, progress_callback, shared_discretization_caches=None):
+    # Quadratic and cubic candidates share panels, so near-pair kernel moments
+    # computed for one are reused by the next.
+    from ghost_backend.twod.polynomial_quadrature import moment_cache_scope
+    with moment_cache_scope():
+        return _run_certified(low_level_solver, geometry_snapshot, solver_kwargs,
+                              mesh_convergence_policy, progress_callback, shared_discretization_caches)
+
+
+def _run_certified(low_level_solver, geometry_snapshot, solver_kwargs,
+                   mesh_convergence_policy, progress_callback, shared_discretization_caches=None):
     from ghost_backend.twod import solver as s
     from ghost_backend.twod.preparation import prepare_geometry
     from ghost_backend.twod.adaptive_geometry import eligible_snapshot

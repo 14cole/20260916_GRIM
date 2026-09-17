@@ -58,6 +58,21 @@ class CompressedPathTests(unittest.TestCase):
         operator.row_error.fill(1e9)
         with self.assertRaises((HierarchicalRejected,RuntimeError)):solve_sweep(factor,rhs,basis)
 
+    def test_condition_probes_tolerate_adjoint_bounds_that_field_solves_reject(self):
+        # Column truncation bounds between the solve and probe limits: field
+        # solves in that direction reject, the condition diagnostic does not.
+        a,source,operator=self.system()
+        operator.column_error[:]=1e-11*float(np.max(operator.column_norm))
+        diagnostics={};factor=CompressedFactor(operator,diagnostics)
+        row=np.max(abs(a),axis=1);eq=a/row[:,None];column=np.max(abs(eq),axis=0);eq=eq/column[None,:]
+        reference=np.linalg.cond(eq,1)
+        self.assertLess(abs(np.log10(diagnostics['condition_est']/reference)),np.log10(3.))
+        self.assertLessEqual(factor.event['max_backward_error'],1e-12)
+        self.assertGreater(factor.event['max_probe_backward_error'],1e-12)
+        b=np.ones((len(a),1),complex)
+        np.testing.assert_allclose(factor.inverse(b),np.linalg.solve(a,b),rtol=1e-10,atol=1e-11)
+        with self.assertRaises(HierarchicalRejected):factor.inverse(b,trans=2)
+
     def test_storage_cancellation_and_invalid_rhs_reject(self):
         a,source,operator=self.system(32)
         with mock.patch('ghost_backend.compressed.runtime.storage_budget',return_value=operator.bytes+1):

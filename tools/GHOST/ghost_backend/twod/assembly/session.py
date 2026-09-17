@@ -63,7 +63,8 @@ def shared_assembly(function):
             return function(*args, **kwargs)
         session = AssemblySession()
         session.abort_event = signature.bind(*args, **kwargs).arguments.get('abort_event')
-        with _SESSION.override(session):
+        from ghost_backend.twod.polynomial_quadrature import moment_cache_scope
+        with _SESSION.override(session), moment_cache_scope():
             try:
                 result = function(*args, **kwargs)
                 result.setdefault('metadata', {})['assembled_system_reuses'] = session.reuses

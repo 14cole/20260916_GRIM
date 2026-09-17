@@ -6,6 +6,14 @@ from ghost_backend.compressed.inverse import CompressedSystem
 from ghost_backend.linalg.hierarchical import HierarchicalRejected
 from ghost_backend.execution.metrics import timed_stage
 
+# Solves that produce fields must meet this original-coefficient backward error.
+SOLVE_BACKWARD_ERROR_LIMIT=1e-12
+# Condition probes only locate ||A^-1|| for a gate at 1e6. A backward error eps
+# perturbs that norm by about kappa*eps relative, so 1e-9 moves any estimate
+# the gate can pass by at most ~1e-3; larger estimates are not accepted at it.
+CONDITION_PROBE_BACKWARD_ERROR_LIMIT=1e-9
+CONDITION_PROBE_ACCEPTED_PERTURBATION=1e-2
+
 
 class CompressedFactor:
     def __init__(self,operator,diagnostics=None,label='compressed system',evidence=None,checkpoint=None,
@@ -91,7 +99,7 @@ class CompressedFactor:
             if info:raise HierarchicalRejected('Compressed GMRES did not converge within its cap.')
         return x,self.a.matmul(x,trans)-b
 
-    def inverse(self,rhs,trans=0,return_residual=False):
+    def inverse(self,rhs,trans=0,return_residual=False,limit=SOLVE_BACKWARD_ERROR_LIMIT):
         if trans not in (0,1,2):raise ValueError('Invalid transpose mode.')
         b=np.asarray(rhs,complex);vector=b.ndim==1
         if vector:b=b[:,None]
@@ -105,20 +113,29 @@ class CompressedFactor:
         if failed:
             self._build(2e-10);x,residual=self._refine(b,trans)
         errors=self.physical_errors(x,b,residual,trans)
-        if not np.all(np.isfinite(errors)) or np.max(errors)>1e-12:
+        if not np.all(np.isfinite(errors)) or np.max(errors)>limit:
             raise HierarchicalRejected('Compressed inverse failed the original-coefficient error bound.')
-        self.event['max_backward_error']=max(self.event['max_backward_error'],float(np.max(errors)))
+        if limit<=SOLVE_BACKWARD_ERROR_LIMIT:
+            self.event['max_backward_error']=max(self.event['max_backward_error'],float(np.max(errors)))
+        else:
+            self.event['max_probe_backward_error']=max(self.event.get('max_probe_backward_error',0.),float(np.max(errors)))
         solution=x[:,0] if vector else x
         if return_residual:return solution,residual[:,0] if vector else residual
         return solution
 
     def _condition(self):
         rows,columns,norm=self.a.equilibrate()
+        probe=CONDITION_PROBE_BACKWARD_ERROR_LIMIT
         inverse=LinearOperator(self.a.shape,
-            matvec=lambda z:columns*self.inverse(rows*np.asarray(z).reshape(-1)),
-            rmatvec=lambda z:rows*self.inverse(columns*np.asarray(z).reshape(-1),trans=2),dtype=complex)
+            matvec=lambda z:columns*self.inverse(rows*np.asarray(z).reshape(-1),limit=probe),
+            rmatvec=lambda z:rows*self.inverse(columns*np.asarray(z).reshape(-1),trans=2,limit=probe),dtype=complex)
         estimate=norm*float(onenormest(inverse))
         if not np.isfinite(estimate):raise HierarchicalRejected('Nonfinite compressed condition estimate.')
+        if estimate*probe>CONDITION_PROBE_ACCEPTED_PERTURBATION and self.event.get('max_probe_backward_error',0.)>SOLVE_BACKWARD_ERROR_LIMIT:
+            # Too ill-conditioned for the relaxed probes to bound the estimate.
+            probe=SOLVE_BACKWARD_ERROR_LIMIT
+            estimate=norm*float(onenormest(inverse))
+            if not np.isfinite(estimate):raise HierarchicalRejected('Nonfinite compressed condition estimate.')
         self.diagnostics.update(condition_est=estimate,condition_method='equilibrated_1norm_compressed_refined_inverse',condition_label=self.label)
 
     @timed_stage('linear_solve')
