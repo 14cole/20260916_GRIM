@@ -60,7 +60,10 @@ class PreparedOracle:
                     if source[j]:np.add.at(source_mass,np.asarray(e.node_ids),integral_bounds(e))
                     weight=1 if coefficient is None else abs(coefficient[j])
                     np.add.at(weighted_mass,np.asarray(e.node_ids),weight*integral_bounds(e))
-                prepared.append((request,template,source,coefficient,source_mass,weighted_mass))
+                # Nodes that each route can reach, so tile queries skip whole-mesh maps.
+                reach=[[(old_r,old_c,weight,np.flatnonzero(old_r>=0),np.flatnonzero(old_c>=0))
+                        for old_r,old_c,weight in output.routes] for output in template]
+                prepared.append((request,reach,source,coefficient,source_mass,weighted_mass))
             self.groups.append((k,prepared))
 
         mass=mr._sparse_mass(mesh);rr=[];cc=[];vv=[]
@@ -85,7 +88,9 @@ class PreparedOracle:
     def get_with_error(self,rows,cols,assemble=True):
         rows,cols=CompactOperator._ids(rows,self.n),CompactOperator._ids(cols,self.n)
         if len(rows)*len(cols)*24>16*1024**2:raise MemoryError('Regional coefficient query exceeds 16 MiB.')
-        matrix=np.asarray(self.jumps[rows,:][:,cols].toarray(),order='F')
+        jumps=self.jumps[rows,:][:,cols].tocoo()
+        matrix=np.zeros((len(rows),len(cols)),complex,order='F')
+        np.add.at(matrix,(jumps.row,jumps.col),jumps.data)
         error=np.zeros(matrix.shape)
         self.entries+=matrix.size;self.calls+=1;self.max_entries=max(self.max_entries,matrix.size)
         rd,cd=np.full(self.n,-1,int),np.full(self.n,-1,int)
@@ -94,26 +99,30 @@ class PreparedOracle:
         pending=[]
         for k,prepared in self.groups:
             outputs=[];masks=[];coefficients=[]
-            for request,template,source,coefficient,source_mass,weighted_mass in prepared:
+            for request,reach,source,coefficient,source_mass,weighted_mass in prepared:
                 pair=[]
-                for kind,output in enumerate(template):
+                for kind,output in enumerate(reach):
                     routes=[]
-                    for old_r,old_c,weight in output.routes:
+                    for old_r,old_c,weight,row_nodes,column_nodes in output:
+                        local_r=rd[old_r[row_nodes]];ri=row_nodes[local_r>=0]
+                        if not len(ri):continue
+                        local_c=cd[old_c[column_nodes]];ci=column_nodes[local_c>=0]
+                        if not len(ci):continue
                         r,c=np.full(nn,-1,int),np.full(nn,-1,int)
-                        ok=old_r>=0;r[ok]=rd[old_r[ok]]
-                        ok=old_c>=0;c[ok]=cd[old_c[ok]]
-                        ri,ci=np.flatnonzero(r>=0),np.flatnonzero(c>=0)
-                        if not len(ri) or not len(ci):continue
+                        r[ri]=local_r[local_r>=0];c[ci]=local_c[local_c>=0]
                         dropped=False
                         if self.cut is not None and complex(k).imag<0:
-                            lower=np.linalg.norm(self.xy[ri,None]-self.xy[None,ci],axis=-1)
+                            dx=self.xy[ri,0][:,None]-self.xy[ci,0][None,:]
+                            dy=self.xy[ri,1][:,None]-self.xy[ci,1][None,:]
+                            np.multiply(dx,dx,out=dx);np.multiply(dy,dy,out=dy)
+                            lower=np.sqrt(np.add(dx,dy,out=dx),out=dx);dy=None
                             lower=np.maximum(0,lower-self.radius[ri,None]-self.radius[None,ci])
                             if np.all(-complex(k).imag*lower>=self.cut):
                                 envelopes=hankel_envelopes(k,lower)
                                 if envelopes is not None:
                                     obs=weighted_mass[ri] if kind==0 else self.normal_mass[ri]
                                     bound=envelopes[kind]*obs[:,None]*source_mass[None,ci]*abs(weight[ri,None])
-                                    np.add.at(error,(r[ri,None],c[None,ci]),bound)
+                                    np.add.at(error.reshape(-1),(r[ri,None]*error.shape[1]+c[None,ci]).ravel(),bound.ravel())
                                     self.dropped_routes+=1;dropped=True
                         if not dropped:routes.append((r,c,weight))
                     rid=np.flatnonzero(np.any([r>=0 for r,c,w in routes],axis=0)) if routes else np.empty(0,int)

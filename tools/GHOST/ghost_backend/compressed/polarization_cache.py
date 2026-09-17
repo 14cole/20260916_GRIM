@@ -1,5 +1,5 @@
 """Finalize two polarized operators from each shared geometry tile query."""
-from ghost_backend.compressed.operator import StreamedOperator
+from ghost_backend.compressed.operator import StreamedOperator, TileWriter
 from pathlib import Path
 import numpy as np
 import os,tempfile,hashlib
@@ -21,8 +21,9 @@ class SpooledOperator(StreamedOperator):
             try:self.assemble_tiles(args[0])
             except BaseException:
                 self.close();raise
-    def add_tile(self,i,j,raw,tail):
-        super().add_tile(i,j,raw,tail)
+    def store_tile(self,compressed):
+        super().store_tile(compressed)
+        i,j=compressed[:2]
         payload=self.tiles.pop((i,j));records=[]
         for value in payload:
             if value is None:records.append(None);continue
@@ -52,9 +53,12 @@ class SpooledOperator(StreamedOperator):
             raise
         self.records.clear();self.loaded=True;self.close()
         self.evidence['spooled_bytes']=self.spool_bytes
-    def _get(self,rows,cols):
+    def _get(self,rows,cols,row_plan=None,col_plan=None):
         if not self.loaded:raise ValueError('Load the compressed spool before querying it.')
-        return super()._get(rows,cols)
+        return super()._get(rows,cols,row_plan,col_plan)
+    def block_matmul(self,rows,cols,x,row_plan=None,col_plan=None):
+        if not self.loaded:raise ValueError('Load the compressed spool before multiplying it.')
+        return super().block_matmul(rows,cols,x,row_plan,col_plan)
     def matmul(self,b,trans=0):
         if not self.loaded:raise ValueError('Load the compressed spool before multiplying it.')
         return super().matmul(b,trans)
@@ -72,6 +76,14 @@ class SpooledOperator(StreamedOperator):
         except OSError:pass
 
 
+def _store(operators,budget,index):
+    def store(compressed):
+        target=operators[index]
+        target.budget=budget-operators[1-index].bytes
+        target.store_tile(compressed)
+    return store
+
+
 def build_pair(oracle,coordinates,tile=512,budget=512*1024**2,checkpoint=None,spool_directory=None):
     operators=[]
     try:
@@ -79,15 +91,14 @@ def build_pair(oracle,coordinates,tile=512,budget=512*1024**2,checkpoint=None,sp
             cls=SpooledOperator if index==1 and spool_directory is not None else StreamedOperator
             extra={'directory':spool_directory} if cls is SpooledOperator else {}
             operators.append(cls(o,coordinates,tile=tile,budget=budget,checkpoint=checkpoint,assemble=False,**extra))
-        for j,cols in enumerate(operators[0].groups):
-            if hasattr(oracle,'prepare_columns'):oracle.prepare_columns(cols)
-            for i,rows in enumerate(operators[0].groups):
-                values=oracle.get_with_error(rows,cols)
-                for index in range(2):
-                    target=operators[index]
-                    target.budget=budget-operators[1-index].bytes
-                    target.add_tile(i,j,*values[index])
-                    values[index]=None
+        with TileWriter() as writer:
+            for j,cols in enumerate(operators[0].groups):
+                if hasattr(oracle,'prepare_columns'):oracle.prepare_columns(cols)
+                for i,rows in enumerate(operators[0].groups):
+                    values=oracle.get_with_error(rows,cols)
+                    for index in range(2):
+                        writer.submit(operators[index].compress_tile,_store(operators,budget,index),i,j,*values[index])
+                    values=None
         for op,source in zip(operators,oracle.oracles):op.finalize(source)
     except BaseException:
         for op in operators:

@@ -17,15 +17,47 @@ class PreparedAccess:
     """Internal tile access: tree indices are already valid unique subsets."""
     def __init__(self,oracle):
         self.get=oracle._get
+        if hasattr(oracle,'plan'):
+            self.plan,self.block_matmul=oracle.plan,oracle.block_matmul
+
+
+# Blocks above this many entries estimate their ACA error from random probes
+# instead of reconstructing every coefficient; smaller blocks are checked exactly.
+EXACT_ERROR_ENTRIES=1<<16
+ERROR_PROBES=8
 
 
 class Block(hf.Block):
     def __init__(self,oracle,rows,cols,checkpoint):
         self.oracle,self.rows,self.cols=oracle,rows,cols
         self.shape=len(rows),len(cols);self.checkpoint=checkpoint
-    def row(self,i):return self.oracle.get(self.rows[i:i+1],self.cols)[0]
-    def col(self,j):return self.oracle.get(self.rows,self.cols[j:j+1])[:,0]
+        self.planned=hasattr(oracle,'plan')
+        if self.planned:self.row_plan,self.col_plan=oracle.plan(rows),oracle.plan(cols)
+        self.random=None
+    def row(self,i):
+        if self.planned:return self.oracle.get(self.rows[i:i+1],self.cols,None,self.col_plan)[0]
+        return self.oracle.get(self.rows[i:i+1],self.cols)[0]
+    def col(self,j):
+        if self.planned:return self.oracle.get(self.rows,self.cols[j:j+1],self.row_plan,None)[:,0]
+        return self.oracle.get(self.rows,self.cols[j:j+1])[:,0]
     def error(self,u,v):
+        """Relative Frobenius error of u@v and the row where it is largest.
+
+        HODLR blocks are only a preconditioner, checked by refinement against the
+        tile operator, so large blocks use a Gaussian probe estimate
+        ||(A-uv)W||/||AW|| instead of reconstructing the whole block.
+        """
+        if self.planned and self.shape[0]*self.shape[1]>EXACT_ERROR_ENTRIES:
+            self.checkpoint()
+            if self.random is None:
+                self.random=np.random.default_rng((self.shape[0],self.shape[1],int(self.rows[0]),int(self.cols[0])))
+            probes=(self.random.standard_normal((self.shape[1],ERROR_PROBES))
+                    +1j*self.random.standard_normal((self.shape[1],ERROR_PROBES)))
+            image=self.oracle.block_matmul(self.rows,self.cols,probes,self.row_plan,self.col_plan)
+            total=float(np.vdot(image,image).real)
+            if u.shape[1]:image-=u @ (v @ probes)
+            norms=np.sum(abs(image)**2,axis=1)
+            return np.sqrt(float(norms.sum())/max(total,1e-300)),int(np.argmax(norms))
         total=error=largest=0.;pivot=0
         width=max(1,min(32,(16*1024**2)//max(16*len(self.cols),1)))
         for start in range(0,len(self.rows),width):

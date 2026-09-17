@@ -269,6 +269,30 @@ class CompressedPathTests(unittest.TestCase):
         error,pivot=block.error(np.ones((65,1),complex),np.ones((1,33000),complex))
         self.assertEqual(error,0.)
 
+    def test_planned_tile_access_and_probe_error_estimates(self):
+        from ghost_backend.compressed.inverse import Block,PreparedAccess
+        n=700;x=np.linspace(0,1,n)
+        a=1/(1+40*abs(x[:,None]-x[None,:]))+1j*np.exp(-abs(x[:,None]-x[None,:]))
+        operator=StreamedOperator(Exact(a),x[:,None],tile=64)
+        access=PreparedAccess(operator)
+        rng=np.random.RandomState(5)
+        rows=np.sort(rng.choice(n,300,replace=False));cols=rng.permutation(n)[:350]
+        np.testing.assert_allclose(operator.get(rows,cols),a[np.ix_(rows,cols)],rtol=1e-12,atol=1e-13)
+        np.testing.assert_allclose(operator.get(rows[3:4],cols),a[np.ix_(rows[3:4],cols)],rtol=1e-12,atol=1e-13)
+        probes=rng.randn(len(cols),3)+1j*rng.randn(len(cols),3)
+        np.testing.assert_allclose(operator.block_matmul(rows,cols,probes),a[np.ix_(rows,cols)]@probes,rtol=1e-12,atol=1e-12)
+        left,right=np.arange(350),np.arange(350,700)
+        block=Block(access,left,right,lambda:None)
+        exact=a[np.ix_(left,right)]
+        u,s,vh=np.linalg.svd(exact)
+        for rank in (1,3,6):
+            approximation=(u[:,:rank]*s[:rank],vh[:rank])
+            residual=exact-approximation[0]@approximation[1]
+            truth=np.linalg.norm(residual)/np.linalg.norm(exact)
+            estimate,pivot=block.error(*approximation)
+            self.assertGreater(estimate,truth/4);self.assertLess(estimate,truth*4)
+            self.assertLess(pivot,350)
+
     def test_singular_system_rejects_without_dense_global_fallback(self):
         operator=StreamedOperator(Exact(np.zeros((16,16),complex)),np.arange(16)[:,None],tile=8)
         with mock.patch('ghost_backend.linalg.dense.DenseFactor.__init__',side_effect=AssertionError('dense factor')):

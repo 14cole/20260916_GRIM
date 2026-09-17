@@ -15,12 +15,41 @@ class SystemScatter:
         self.routes = routes
 
     def scatter_add(self, rows, columns, values):
+        rows, columns = np.asarray(rows), np.asarray(columns)
+        if rows.ndim == 2 and columns.ndim == 2 and rows.shape[1] == 1 and columns.shape[0] == 1:
+            self._scatter_outer(rows[:, 0], columns[0], values)
+            return
         for row_map, column_map, weights in self.routes:
             rr, cc = np.broadcast_arrays(row_map[rows], column_map[columns])
             keep = (rr >= 0) & (cc >= 0)
             if np.any(keep):
                 scaled = np.broadcast_to(values, keep.shape) * np.broadcast_to(weights[rows], keep.shape)
                 np.add.at(self.matrix, (rr[keep], cc[keep]), scaled[keep])
+
+    def _scatter_outer(self, rows, columns, values):
+        """rows x columns tiles: same sums as scatter_add, without per-entry index arrays."""
+        values = np.broadcast_to(values, (len(rows), len(columns)))
+        for row_map, column_map, weights in self.routes:
+            ri = np.flatnonzero(row_map[rows] >= 0)
+            if not len(ri):
+                continue
+            ci = np.flatnonzero(column_map[columns] >= 0)
+            if not len(ci):
+                continue
+            r, c = row_map[rows[ri]], column_map[columns[ci]]
+            if len(ri) == len(rows) and len(ci) == len(columns):
+                block = values * weights[rows][:, None]
+            else:
+                block = values[np.ix_(ri, ci)] * weights[rows[ri]][:, None]
+            matrix = self.matrix
+            # One-dimensional ufunc.at over a contiguous view is several times
+            # faster than 2-D fancy indexing and adds duplicates in the same order.
+            if matrix.flags.f_contiguous:
+                np.add.at(matrix.reshape(-1, order='F'), (r[:, None] + c[None, :] * matrix.shape[0]).ravel(), block.ravel())
+            elif matrix.flags.c_contiguous:
+                np.add.at(matrix.reshape(-1), (r[:, None] * matrix.shape[1] + c[None, :]).ravel(), block.ravel())
+            else:
+                np.add.at(matrix, (r[:, None], c[None, :]), block)
 
 
 class MatrixDestination(SystemScatter):

@@ -22,6 +22,44 @@ from test_compact_multi_region import prepared
 
 
 class SolverEfficiencyTests(unittest.TestCase):
+    def test_outer_scatter_matches_entrywise_accumulation(self):
+        from ghost_backend.twod.assembly.scatter import SystemScatter
+        rng=np.random.RandomState(31);nodes=12
+        routes=[]
+        for _ in range(3):
+            row_map=np.full(nodes,-1,np.int64);column_map=np.full(nodes,-1,np.int64)
+            row_map[rng.choice(nodes,8,replace=False)]=rng.choice(9,8,replace=False)
+            column_map[rng.choice(nodes,7,replace=False)]=rng.choice(7,7,replace=False)
+            routes.append((row_map,column_map,rng.randn(nodes)+1j*rng.randn(nodes)))
+        for rows in (np.array([0,3,5,7,11]),np.array([0,3,3,7,11])):
+            columns=np.array([1,2,4,4,6,9,10])
+            values=rng.randn(len(rows),len(columns))+1j*rng.randn(len(rows),len(columns))
+            expected=np.zeros((9,7),complex)
+            for i,r in enumerate(rows):
+                for j,c in enumerate(columns):
+                    for row_map,column_map,weights in routes:
+                        if row_map[r]>=0 and column_map[c]>=0:
+                            expected[row_map[r],column_map[c]]+=values[i,j]*weights[r]
+            actual=np.zeros((9,7),complex,order='F')
+            SystemScatter(actual,nodes,np.arange(nodes),np.arange(nodes),routes).scatter_add(rows[:,None],columns[None,:],values)
+            np.testing.assert_allclose(actual,expected,rtol=1e-14,atol=1e-14)
+
+    def test_real_wavenumber_far_kernels_use_validated_table(self):
+        mesh,_,_=prepared('pec','TE',20)
+        state=execution.CPUState();k=37.
+        with execution._STATE.override(state):
+            fg,fh=kernels.select_far_kernels(mesh,k,ops._far_green_into,ops._far_hankel1_into)
+        self.assertTrue(hasattr(fg,'pair'))
+        self.assertTrue(state.table_events[0]['used'])
+        distances=np.array([[1e-6,.003,.07,.4]]);kr=k*distances
+        g,h=np.empty(distances.shape,complex),np.empty(distances.shape,complex)
+        fg.pair(k,True,distances,kr,np.empty_like(distances),g,h)
+        eg,eh=np.empty_like(g),np.empty_like(h)
+        ops._far_green_into(k,True,distances,kr,np.empty_like(distances),eg)
+        ops._far_hankel1_into(k,True,distances,kr,np.empty_like(distances),eh)
+        np.testing.assert_allclose(g,eg,rtol=3e-13,atol=0)
+        np.testing.assert_allclose(h,eh,rtol=3e-13,atol=0)
+
     def test_complex_frobenius_norm_handles_layouts(self):
         from ghost_backend.linalg.sweep import _frobenius_norm
         rng=np.random.RandomState(237)

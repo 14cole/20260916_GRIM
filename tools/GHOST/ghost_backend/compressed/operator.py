@@ -1,4 +1,7 @@
 """One-pass tile assembly and compressed operator storage."""
+import collections
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from ghost_backend.twod.assembly.compact import CompactOperator
 import scipy.linalg as la
@@ -42,14 +45,47 @@ def tile_payload(raw, tail, tolerance, method, probe=True):
     if left.nbytes+right.nbytes >= raw.nbytes:
         return (raw,None), raw, tail, False
     if reconstructed is None:
+        # The sampled proposal above was already verified against the whole tile.
         reconstructed=left@right
         difference=abs(raw-reconstructed)
-
-
-    if np.linalg.norm(difference)>tolerance*norm:
-        return (raw,None), raw, tail, False
+        if np.linalg.norm(difference)>tolerance*norm:
+            return (raw,None), raw, tail, False
     tail+=difference
     return (left,right), reconstructed, tail, True
+
+
+class TileWriter:
+    """Compress finished tiles on worker threads while the next tile assembles.
+
+    Workers only run pure compression; each result is stored on the caller's
+    thread in submission order, so tile order, byte accounting and results are
+    identical to the serial loop. At most `depth` tiles wait in memory. Leaving
+    the context waits for the workers, so owners may close spools afterwards.
+    """
+    def __init__(self, workers=2, depth=4):
+        self.workers, self.depth, self.pending, self.pool = workers, depth, collections.deque(), None
+
+    def __enter__(self):
+        self.pool = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix='ghost-tiles')
+        return self
+
+    def submit(self, compress, store, *args):
+        self.pending.append((self.pool.submit(contextvars.copy_context().run, compress, *args), store))
+        while self.pending and (len(self.pending) > self.depth or self.pending[0][0].done()):
+            future, store = self.pending.popleft()
+            store(future.result())
+
+    def __exit__(self, kind, value, traceback):
+        try:
+            while kind is None and self.pending:
+                future, store = self.pending.popleft()
+                store(future.result())
+        finally:
+            for future, _ in self.pending:
+                future.cancel()
+            self.pending.clear()
+            self.pool.shutdown(wait=True)
+        return False
 
 
 class StreamedOperator:
@@ -88,13 +124,14 @@ class StreamedOperator:
         self.assemble_tiles(oracle)
 
     def assemble_tiles(self,oracle):
-        for j,cols in enumerate(self.groups):
-            if hasattr(oracle,'prepare_columns'):oracle.prepare_columns(cols)
-            for i,rows in enumerate(self.groups):
-                self.checkpoint()
-                raw,tail=oracle.get_with_error(rows,cols)
-                self.add_tile(i,j,raw,tail)
-                raw=tail=payload=None
+        with TileWriter() as writer:
+            for j,cols in enumerate(self.groups):
+                if hasattr(oracle,'prepare_columns'):oracle.prepare_columns(cols)
+                for i,rows in enumerate(self.groups):
+                    self.checkpoint()
+                    raw,tail=oracle.get_with_error(rows,cols)
+                    writer.submit(self.compress_tile,self.store_tile,i,j,raw,tail)
+                    raw=tail=None
         self.finalize(oracle)
 
     def separated(self, i, j):
@@ -105,23 +142,37 @@ class StreamedOperator:
         return np.linalg.norm(gap) > .5 * diameter
 
     def add_tile(self,i,j,raw,tail):
+        self.store_tile(self.compress_tile(i,j,raw,tail))
+
+    def compress_tile(self,i,j,raw,tail):
+        """Validate and compress one tile without touching shared operator state."""
         self.checkpoint()
         rows,cols=self.groups[i],self.groups[j]
-        if (i,j) in self.tiles or raw.shape!=(len(rows),len(cols)) or tail.shape!=raw.shape:
+        if raw.shape!=(len(rows),len(cols)) or tail.shape!=raw.shape:
             raise ValueError('Duplicate or incorrectly shaped tile.')
-        self.peak_tile=max(self.peak_tile,raw.nbytes+tail.nbytes)
+        size=raw.nbytes+tail.nbytes
         if not np.all(np.isfinite(raw)) or not np.all(np.isfinite(tail)) or np.any(tail<0):
             raise ValueError('Oracle returned invalid coefficients or error bounds.')
-        payload=(raw,None)
+        payload,accepted=(raw,None),False
         if i!=j:
             payload,raw,tail,accepted=tile_payload(raw,tail,self.tolerance,self.compression,probe=self.separated(i,j))
-            self.compressed+=int(accepted)
         magnitude=abs(raw)
-        self.row_norm[rows]+=np.sum(magnitude,axis=1)
-        self.row_max[rows]=np.maximum(self.row_max[rows],np.max(magnitude,axis=1))
-        self.row_error[rows]+=np.sum(tail,axis=1)
-        self.column_norm[cols]+=np.sum(magnitude,axis=0)
-        self.column_error[cols]+=np.sum(tail,axis=0)
+        sums=(np.sum(magnitude,axis=1),np.max(magnitude,axis=1),np.sum(tail,axis=1),
+              np.sum(magnitude,axis=0),np.sum(tail,axis=0))
+        return i,j,size,payload,accepted,sums
+
+    def store_tile(self,compressed):
+        """Account one compressed tile; callers store tiles in assembly order."""
+        i,j,size,payload,accepted,(row_norm,row_max,row_error,column_norm,column_error)=compressed
+        if (i,j) in self.tiles:raise ValueError('Duplicate or incorrectly shaped tile.')
+        rows,cols=self.groups[i],self.groups[j]
+        self.peak_tile=max(self.peak_tile,size)
+        self.compressed+=int(accepted)
+        self.row_norm[rows]+=row_norm
+        self.row_max[rows]=np.maximum(self.row_max[rows],row_max)
+        self.row_error[rows]+=row_error
+        self.column_norm[cols]+=column_norm
+        self.column_error[cols]+=column_error
         self.bytes+=sum(a.nbytes for a in payload if a is not None)
         if self.bytes>self.budget:raise MemoryError('Compressed operator exceeded its retained-storage cap.')
         self.tiles[i,j]=payload
@@ -160,20 +211,46 @@ class StreamedOperator:
         rows,cols=CompactOperator._ids(rows,self.n),CompactOperator._ids(cols,self.n)
         return self._get(rows,cols)
 
-    def _get(self,rows,cols):
+    def plan(self,ids):
+        """Tile groups of a validated index subset: (group, positions in ids, local tile ids)."""
+        if len(ids)==1:
+            return [(int(self.group_id[ids[0]]),np.zeros(1,int),self.local_id[ids])]
+        group=self.group_id[ids]
+        order=np.argsort(group,kind='stable')
+        return [(int(group[positions[0]]),positions,self.local_id[ids[positions]])
+                for positions in np.split(order,np.flatnonzero(np.diff(group[order]))+1) if len(positions)]
+
+    def _get(self,rows,cols,row_plan=None,col_plan=None):
         """Internal access for index subsets of a validated spatial permutation."""
         if len(rows)*len(cols)*16>16*1024**2:
             raise MemoryError('Coefficient query exceeds the 16 MiB workspace limit.')
         self.entries+=len(rows)*len(cols);self.calls+=1;self.max_entries=max(self.max_entries,len(rows)*len(cols))
         result=np.empty((len(rows),len(cols)),complex)
-        for i in np.unique(self.group_id[rows]):
+        row_plan=self.plan(rows) if row_plan is None else row_plan
+        col_plan=self.plan(cols) if col_plan is None else col_plan
+        for i,ri,local_r in row_plan:
             self.checkpoint()
-            ri=np.flatnonzero(self.group_id[rows]==i);local_r=self.local_id[rows[ri]]
-            for j in np.unique(self.group_id[cols]):
-                ci=np.flatnonzero(self.group_id[cols]==j);local_c=self.local_id[cols[ci]]
+            single=len(ri)==1
+            for j,ci,local_c in col_plan:
                 left,right=self.tiles[i,j]
-                value=left[np.ix_(local_r,local_c)] if right is None else left[local_r] @ right[:,local_c]
-                result[np.ix_(ri,ci)]=value
+                if single:
+                    result[ri[0],ci]=left[local_r[0],local_c] if right is None else left[local_r[0]] @ right[:,local_c]
+                else:
+                    value=left[np.ix_(local_r,local_c)] if right is None else left[local_r] @ right[:,local_c]
+                    result[np.ix_(ri,ci)]=value
+        return result
+
+    def block_matmul(self,rows,cols,x,row_plan=None,col_plan=None):
+        """A[rows][:,cols] @ x without forming the block (x has len(cols) rows)."""
+        row_plan=self.plan(rows) if row_plan is None else row_plan
+        col_plan=self.plan(cols) if col_plan is None else col_plan
+        result=np.zeros((len(rows),x.shape[1]),complex)
+        for j,ci,local_c in col_plan:
+            self.checkpoint()
+            local=np.zeros((len(self.groups[j]),x.shape[1]),complex);local[local_c]=x[ci]
+            for i,ri,local_r in row_plan:
+                left,right=self.tiles[i,j]
+                result[ri]+=left[local_r] @ (local if right is None else right @ local)
         return result
 
     def matmul(self,b,trans=0):

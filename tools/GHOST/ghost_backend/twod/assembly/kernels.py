@@ -216,7 +216,9 @@ class KernelTable:
 def select_far_kernels(mesh, k, green, hankel, domain_upper=None):
     """Return immutable closures before launching tile threads."""
     state = current_state()
-    if state is None or not mesh.elements or complex(k).imag == 0:
+    # Real wavenumbers use the table too: its native Horner evaluation is about
+    # 5x faster than the four scipy Bessel calls, validated to the same 2e-13.
+    if state is None or not mesh.elements:
         return green, hankel
     if domain_upper is None:
         points = np.array([p for e in mesh.elements for p in (e.p0, e.p1)])
@@ -232,7 +234,7 @@ def select_far_kernels(mesh, k, green, hankel, domain_upper=None):
         try:
 
 
-            table_upper = min(upper, 128./(-complex(k).imag))
+            table_upper = upper if complex(k).imag == 0 else min(upper, 128./(-complex(k).imag))
             reason = None
             try:
                 table = KernelTable(k, table_upper)
