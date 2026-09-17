@@ -130,6 +130,13 @@ class StreamedOperator:
         self.assemble_tiles(oracle)
 
     def assemble_tiles(self,oracle):
+        from ghost_backend.compressed.tile_processes import prepare, compressed_tiles
+        workers,payload=prepare(oracle,[self])
+        if workers:
+            for (result,) in compressed_tiles(oracle,[self],workers,payload,self.checkpoint):
+                self.store_tile(result)
+            self.finalize(oracle)
+            return
         with TileWriter() as writer:
             for j,cols in enumerate(self.groups):
                 if hasattr(oracle,'prepare_columns'):oracle.prepare_columns(cols)

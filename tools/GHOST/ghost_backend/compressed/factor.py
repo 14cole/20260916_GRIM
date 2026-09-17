@@ -19,6 +19,10 @@ GMRES_RESTART=20
 GMRES_ITERATION_CAP=120
 # Refinement and GMRES both stop at this normwise backward error against the tile operator.
 REFINEMENT_BACKWARD_ERROR=3e-15
+# A 1e-8 preconditioner refines in one or two steps even at 18 GHz, where 1e-6
+# needs nine or more, for about 30% more storage; 1e-6 is kept for when it does not fit.
+PRECONDITIONER_TOLERANCE=1e-8
+COMPACT_PRECONDITIONER_TOLERANCE=1e-6
 
 
 class CompressedFactor:
@@ -40,7 +44,11 @@ class CompressedFactor:
             preconditioners=[],gmres_columns=0,max_refinements=0,refinement_steps=0)
         if evidence is not None:evidence.append(self.event)
         rejected=False
-        try:self._build(1e-6)
+        try:
+            try:self._build(PRECONDITIONER_TOLERANCE)
+            except MemoryError as exc:
+                self.event['compact_preconditioner']=str(exc)
+                self._build(COMPACT_PRECONDITIONER_TOLERANCE)
         except (HierarchicalRejected,np.linalg.LinAlgError,RuntimeWarning) as exc:
             self.event['coarse_rejection']=str(exc);rejected=True
         if rejected:self._build(2e-10)

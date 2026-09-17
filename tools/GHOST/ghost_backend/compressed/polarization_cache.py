@@ -91,14 +91,20 @@ def build_pair(oracle,coordinates,tile=512,budget=512*1024**2,checkpoint=None,sp
             cls=SpooledOperator if index==1 and spool_directory is not None else StreamedOperator
             extra={'directory':spool_directory} if cls is SpooledOperator else {}
             operators.append(cls(o,coordinates,tile=tile,budget=budget,checkpoint=checkpoint,assemble=False,**extra))
-        with TileWriter() as writer:
-            for j,cols in enumerate(operators[0].groups):
-                if hasattr(oracle,'prepare_columns'):oracle.prepare_columns(cols)
-                for i,rows in enumerate(operators[0].groups):
-                    values=oracle.get_with_error(rows,cols)
-                    for index in range(2):
-                        writer.submit(operators[index].compress_tile,_store(operators,budget,index),i,j,*values[index])
-                    values=None
+        from ghost_backend.compressed.tile_processes import prepare, compressed_tiles
+        workers,payload=prepare(oracle,operators)
+        if workers:
+            for results in compressed_tiles(oracle,operators,workers,payload,checkpoint or (lambda:None)):
+                for index in range(2):_store(operators,budget,index)(results[index])
+        else:
+            with TileWriter() as writer:
+                for j,cols in enumerate(operators[0].groups):
+                    if hasattr(oracle,'prepare_columns'):oracle.prepare_columns(cols)
+                    for i,rows in enumerate(operators[0].groups):
+                        values=oracle.get_with_error(rows,cols)
+                        for index in range(2):
+                            writer.submit(operators[index].compress_tile,_store(operators,budget,index),i,j,*values[index])
+                        values=None
         for op,source in zip(operators,oracle.oracles):op.finalize(source)
     except BaseException:
         for op in operators:

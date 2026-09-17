@@ -41,6 +41,9 @@ def _span(ids):
 
 
 class PreparedOracle:
+    # Plain arrays and templates: tile queries may run in worker processes.
+    process_tiles=True
+
     def __init__(self,mesh,infos,pol,cut=None,obs_order=8,src_order=8):
         self.obs_order,self.src_order=obs_order,src_order
         if pol not in ('TE', 'TM'):
@@ -180,6 +183,7 @@ def assemble_groups(mesh,geometry,groups,obs_order=8,src_order=8):
 
 class PairedOracle:
     """TE/TM destinations share geometry/kernel traversal, preserving each law."""
+    process_tiles=True
     def __init__(self,mesh,te_infos,tm_infos,cut=None,obs_order=8,src_order=8):
         self.obs_order,self.src_order=obs_order,src_order
         self.oracles=[PreparedOracle(mesh,te_infos,'TE',cut,obs_order,src_order),PreparedOracle(mesh,tm_infos,'TM',cut,obs_order,src_order)]

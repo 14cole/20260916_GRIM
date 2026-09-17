@@ -28,9 +28,12 @@ Monostatic runs:
   linear mesh as the final fallback.
 - **Numerics.** Double-precision LU, automatic incident-field basis reuse, and
   up to 256 angles per batch.
-- **Threads.** Up to four assembly threads. Factorization and angle solves use
-  every host core for a desktop solve, or the worker's CPU reservation in a
-  batch run.
+- **Threads.** Up to four assembly threads. Large compressed operators are
+  assembled in worker processes instead: up to eight (half the host cores) for
+  a desktop solve, the CPU reservation for a scheduled solve, fewer when
+  memory is short, and none inside batch worker processes. Factorization and
+  angle solves use every host core for a desktop solve, or the worker's CPU
+  reservation in a batch run.
 - **Checkpoints.** Completed frequencies are saved to the application cache
   and reused when an identical run is repeated or resumed. They require
   matching geometry, angles, material file contents, certification settings

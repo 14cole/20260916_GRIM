@@ -108,6 +108,22 @@ class CompressedPathTests(unittest.TestCase):
         np.testing.assert_allclose(actual,np.linalg.solve(a,np.arange(1,17)),rtol=1e-11,atol=1e-12)
         self.assertGreater(factor.event['gmres_columns'],0)
 
+    def test_preconditioner_falls_back_to_compact_tolerance_when_storage_is_short(self):
+        import ghost_backend.compressed.factor as compressed_factor
+        a,source,operator=self.system(64)
+        tolerances=[]
+        real=compressed_factor.CompressedSystem
+        def system(*args,tolerance,**kwargs):
+            tolerances.append(tolerance)
+            if tolerance==compressed_factor.PRECONDITIONER_TOLERANCE:raise MemoryError('storage')
+            return real(*args,tolerance=tolerance,**kwargs)
+        with mock.patch.object(compressed_factor,'CompressedSystem',side_effect=system):
+            factor=CompressedFactor(operator)
+        self.assertEqual(tolerances,[1e-8,1e-6])
+        self.assertEqual((factor.tolerance,factor.event['compact_preconditioner']),(1e-6,'storage'))
+        b=np.arange(64*2).reshape(64,2)+1j
+        np.testing.assert_allclose(factor.inverse(b),np.linalg.solve(a,b),rtol=1e-10,atol=1e-11)
+
     def test_batched_gmres_solves_many_columns_and_adjoints(self):
         import ghost_backend.compressed.factor as compressed_factor
         rng=np.random.RandomState(8);n=120
