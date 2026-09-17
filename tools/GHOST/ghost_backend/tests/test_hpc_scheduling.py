@@ -5,7 +5,7 @@ Integration test for the HPC sweep scheduler.
 Exercises the parts that are easy to get subtly wrong and expensive to debug
 on a cluster:
 
-* `hpc_common.configure_driver` validates and stages every requested setting.
+* A configured copy of the 2-D driver accepts every requested CONFIG setting.
 * Submission builds a manifest, a schedule, and sbatch scripts, and the
   scheduling plan is genuinely balanced by cost rather than by index.
 * Several array tasks working the same run in parallel each solve every unit at
@@ -880,14 +880,19 @@ DRIVER_SETTINGS = {
     "FREQUENCIES_GHZ": [2.0, 3.0, 4.0],
     "AZIMUTHS_DEG": [0.0, 45.0, 90.0],
     "GEOMETRY_UNITS": "meters",
-    "MAX_PANELS": 20000,
     "N_NODES": 2,
     "N_JOBS": 1,
     "SUBMIT": False,
-    "TASKS_PER_CHILD": 2,
     "MAX_WORKERS_PER_NODE": 2,
-    "CLAIM_STALE_SECONDS": 60,
+    # Internal scheduling constants, shortened for the test.
+    "_TASKS_PER_CHILD": 2,
+    "_CLAIM_STALE_SECONDS": 60,
 }
+
+
+def _configure_2d_driver(out_path, settings):
+    from general_fixtures import configured_2d_driver
+    return configured_2d_driver(BACKEND / "run_hpc_monostatic.py", out_path, settings)
 
 
 def _write_closed_2d_geometry(path):
@@ -925,9 +930,7 @@ def _stage_run(root):
     # Exercise an externally staged driver whose module setup refers to an
     # unrelated checkout instead of relying on configure_driver's default.
     settings["JOB_PROLOGUE"] = ["export PYTHONPATH=/unrelated/old/Backend"]
-    return hpc_common.configure_driver(
-        BACKEND / "run_hpc_monostatic.py", root / "driver.py", settings
-    )
+    return _configure_2d_driver(root / "driver.py", settings)
 
 
 def _subprocess_env():
@@ -978,9 +981,7 @@ def test_no_task_starvation():
             "N_NODES": tasks,
             "MAX_WORKERS_PER_NODE": None,
         })
-        driver = hpc_common.configure_driver(
-            BACKEND / "run_hpc_monostatic.py", root / "driver.py", settings
-        )
+        driver = _configure_2d_driver(root / "driver.py", settings)
         env = _subprocess_env()
         if subprocess.run([sys.executable, str(driver)], stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, env=env).returncode:
@@ -1013,9 +1014,9 @@ def test_end_to_end():
         try:
             driver = _stage_run(root)
         except ValueError as exc:
-            check(False, f"configure_driver rejected a CONFIG name: {exc}")
+            check(False, f"the driver rejected a CONFIG name: {exc}")
             return
-        check(True, "configure_driver validated every requested setting")
+        check(True, "the driver accepted every requested CONFIG setting")
 
         result = _run(driver, [])
         if result.returncode != 0:

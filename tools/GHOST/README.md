@@ -3,8 +3,6 @@
 Open `Launch_GHOST_GUI.bat` to start GHOST. The top level contains the launcher,
 Markdown guides, and one `ghost_backend` folder.
 
-GHOST saves separate 2D and BOR `.run.json` setups that local/HPC driver
-configurations can reuse.
 BOR controls include a bounded coefficient cache for compressed solves. See
 [BOR controls and angle conventions](BOR_PERFORMANCE.md) and the shared
 [workflow guide](../../WORKFLOW_GUIDE.md) for local/HPC transfer.
@@ -34,69 +32,32 @@ Use the [backend source guide](BACKEND.md) to find solvers, data I/O,
 geometry operations, feature assembly, and run management. The
 [file-removal audit](DEAD_FILES.md) identifies cleanup candidates.
 
-New 2D monostatic GUI, API, and local/HPC runs default to **Automatic**.
-The backend compares compatible dense and compressed Galerkin solves
-using geometry, materials, angle count, memory, and predicted computation cost.
-Users can run ordinary studies without choosing a solver implementation.
-Detailed kernel, factorization, and geometry presets are under **Advanced
-Settings**, which starts collapsed. Existing explicit saved settings are kept.
-See [automatic solver behavior and qualification](AUTOMATIC_SOLVER.md) and
-[saved execution profiles](RUN_PROFILES.md) for overrides and resource limits.
+2D runs are automatic. The solver tab and the 2D batch drivers ask only for
+geometry, units, frequencies, azimuths, scattering mode, mesh certification and
+accuracy target. The backend (dense or compressed), adaptive mesh, threads and
+memory admission are chosen for each solve, and completed monostatic
+frequencies are checkpointed for resume. See [running 2D solves](RUN_PROFILES.md).
+The collapsed **Tools** section holds the accuracy/performance report and the
+boundary-density plot.
 
-[2D pipeline controls](TWOD_PIPELINE.md) describe automatic backend selection,
-optional local material meshing, faster geometry validation, and desktop
-frequency checkpoints with verified resume.
-
-Local and HPC batch drivers accept `--config path/to/settings.config.json`.
-The 2D scripts expose `SOLVE_PRESET="auto"` plus optional `ADVANCED_OVERRIDES`.
-Auto compares predicted completion of the batch with dense, compressed, and
-mixed workers on the execution node. `small`, `balanced`, and `large` select
-the corresponding desktop presets. See [batch presets](RUN_PROFILES.md).
-They also automatically load an adjacent file with the same stem and the
-`.config.json` suffix. For example:
-
-```json
-{
-  "schema": "ghost.driver-config",
-  "version": 1,
-  "driver": "2d",
-  "settings": {
-    "SOLVE_PRESET": "auto",
-    "ADVANCED_OVERRIDES": {},
-    "FRD_DIR": "ghost_backend/geometry/geometries/FRD",
-    "OPN_DIR": "ghost_backend/geometry/geometries/OPN",
-    "OUTPUT_DIR": "rcs_runs",
-    "FREQUENCIES_GHZ": [2.0, 4.0],
-    "AZIMUTHS_DEG": [0.0, 90.0],
-    "MESH_CERTIFICATION": true
-  }
-}
-```
-
-Use `"driver": "bor"` and `GEOMETRY_DIRS` for BoR. Each driver declares its
-accepted setting names in `_CONFIG_KEYS`; omitted settings keep its defaults.
-Paths in settings retain the driver's existing working-directory semantics.
-An optional `run_setup` object can embed an exported desktop 2-D run recipe.
-Batch drivers accept its monostatic/default-quality subset and reject
-unsupported options or conflicting explicit settings.
-
-`ghost_backend.hpc.common.configure_driver` stages Python source and writes
-validated JSON instead of rewriting assignments. Submission copies both into
-the run directory. Configuration content joins source/runtime provenance, so
-workers reject changes to the settings that produced an existing run.
-New source/configuration versions should use a fresh staging directory.
+For 2D batch sweeps, edit the CONFIG block of `run_local_monostatic.py` or
+`run_hpc_monostatic.py`. BoR drivers also accept
+`--config path/to/settings.config.json` (with `"driver": "bor"`) and
+automatically load an adjacent file with the same stem and the `.config.json`
+suffix. Each BoR driver declares its accepted setting names in `_CONFIG_KEYS`;
+omitted settings keep its defaults. Portable HPC bundles package BoR requests.
 
 The recommended desktop workflow is the top-level GRIM application. Its
 **GHOST** tab embeds the same `ghost_backend/run_gui.py` workspace and the same
 2-D/BoR numerical implementation found here; no solver is duplicated.
 
-The 2-D diagnostic API defaults to `auto`, with `direct` and `experimental_cpu`
-available as explicit overrides. NumPy and SciPy are required for
+The 2-D diagnostic API defaults to `auto`; `direct` and `experimental_cpu`
+remain available to Python callers for tests and diagnostics. NumPy and SciPy are required for
 numerical methods and condition-number checks.
 BoR supports its separate optional native streaming kernel.
 BoR also has [bounded aspect batches, incident-basis reuse, and experimental
 compressed modal assembly](BOR_PERFORMANCE.md), with separate controls in
-Advanced Settings and local/HPC driver configurations.
+the BoR solver options and local/HPC driver configurations.
 
 The [phase and quadrature guidance](SOLVER_PHASE_AND_QUADRATURE.md) describes corrected
 2-D complex phase, bounded BoR near storage, and quadrature convergence

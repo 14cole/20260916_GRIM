@@ -77,24 +77,22 @@ class PipelineGUI(unittest.TestCase):
             self.assertEqual(len(tab.normal_artists),3)
         finally:tab.close()
 
-    def test_new_settings_roundtrip_and_actual_preflight(self):
+    def test_automatic_request_and_actual_preflight(self):
         workspace=GhostWorkspace()
         try:
             tab=workspace.solver_tab
-            preset=tab.geometry_preset_combo
-            preset.setCurrentIndex(preset.findData('adaptive'))
-            self.assertEqual(tab.execution_options_widget.value()['factorization'],'adaptive')
-            self.assertFalse(tab.cmb_solver_method.isEnabled())
-            tab.execution_options_widget.mesh_combo.setCurrentIndex(1)
+            for removed in ('geometry_preset_combo','execution_options_widget','cmb_solver_method',
+                            'cmb_lu_precision','chk_frequency_checkpoints','edit_quality_residual_max'):
+                self.assertFalse(hasattr(tab,removed),removed)
             record=tab._capture_run_setup()
-            self.assertEqual(record['execution_options']['mesh_strategy'],'local')
-            tab._apply_saved_run_setup(record)
-            self.assertEqual(tab.execution_options_widget.value()['mesh_strategy'],'local')
-            note=RunSetupMixin._run_setup_summary(None,fixture('pec',24),'',setup_record({'factorization':'adaptive'}))
+            self.assertEqual((record['solver_method'],record['execution_options']['factorization'],
+                              record['execution_options']['mesh_strategy']),('auto','adaptive','adaptive'))
+            note=RunSetupMixin._run_setup_summary(None,fixture('pec',24),'',setup_record())
             self.assertIn('Planned backend: dense',note)
             tab.cmb_scatter_mode.setCurrentIndex(tab.cmb_scatter_mode.findData('bistatic'))
-            self.assertEqual(tab.execution_options_widget.value()['mesh_strategy'],'global')
-            self.assertFalse(tab.chk_frequency_checkpoints.isEnabled())
+            tab.edit_obs_angles.setText('0, 90')
+            record=tab._capture_run_setup()
+            self.assertEqual((record['solver_method'],record['execution_options']['mesh_strategy']),('direct','global'))
         finally:workspace.close()
 
     def test_real_desktop_sweep_checkpoint_resume_and_preparation(self):

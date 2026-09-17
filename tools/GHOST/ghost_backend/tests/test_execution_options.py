@@ -21,26 +21,22 @@ from ghost_backend.execution.metrics import progress_listener
 from ghost_backend.linalg.hierarchical import factor_mode
 from ghost_backend.linalg.sweep import mode as sweep_mode
 from ghost_backend.compressed.runtime import storage_budget
-from ghost_backend.runs.execution import reconcile_settings, driver_options
-from ghost_backend.runs.setup import DEFAULT_QUALITY, read_setup, save_setup, validate_setup
+from ghost_backend.runs.execution import driver_options
+from ghost_backend.runs.setup import two_d_request
 from ghost_backend.twod import operators, solver
 from test_experimental_cpu import fixture, fields
 
 
-def setup_record(options=None):
-    return dict(schema='grim.2d-run-setup', version=2, frequencies_ghz=[.6],
-                angles_deg=[0., 90., 360.], units='meters', mesh_certification=True,
-                accuracy='standard', lu_precision='double', scattering='monostatic',
-                observation_angles_deg=[], quality=dict(DEFAULT_QUALITY),
-                solver_method='experimental_cpu', execution_options=validate_options(options or {}))
+def setup_record():
+    return two_d_request([.6], [0., 90., 360.], 'meters', True, 'standard', 'monostatic', [])
 
 
 class ExecutionOptionsTests(unittest.TestCase):
     def test_uncaptured_driver_keeps_environment_memory_override(self):
         with mock.patch.dict(os.environ, {'GHOST_MAX_SOLVE_GB': '12.5'}):
-            profile = driver_options(dict(MAX_SOLVE_GB=None, BLAS_THREADS_PER_WORKER=1,
-                                          ASSEMBLY_THREADS='auto'))
+            profile = driver_options(dict(MAX_SOLVE_GB=None))
             self.assertEqual(profile['ram_budget_gib'], 12.5)
+            self.assertEqual(driver_options(dict(MAX_SOLVE_GB=4))['ram_budget_gib'], 4.)
 
     def test_profile_budget_respects_available_memory_and_nested_options(self):
         with execution_scope(dict(ram_budget_gib=48)), mock.patch.object(solver, '_detect_available_gb', return_value=10):
@@ -124,21 +120,20 @@ class ExecutionOptionsTests(unittest.TestCase):
                 raise RuntimeError('abort')
         self.assertEqual(counts(), before)
 
-    def test_saved_setup_roundtrip_and_legacy_migration_ignore_environment(self):
-        record = setup_record(dict(factorization='compressed', compressed_storage_mib=8192,
-                                   ram_budget_gib=8.25, assembly_threads=4, blas_threads=2))
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'airfoil.run.json'
-            save_setup(path, record)
-            with mock.patch.dict(os.environ, {'GHOST_CPU_FACTORIZATION': 'dense'}):
-                self.assertEqual(read_setup(path), record)
-                old = dict(record, version=1)
-                old.pop('execution_options')
-                migrated = validate_setup(old)
-                self.assertEqual(migrated['version'], 2)
-                self.assertEqual(migrated['execution_options']['factorization'], 'dense')
+    def test_run_request_is_automatic_and_ignores_environment(self):
+        with mock.patch.dict(os.environ, {'GHOST_CPU_FACTORIZATION': 'dense'}):
+            record = setup_record()
+        self.assertEqual((record['solver_method'], record['lu_precision']), ('auto', 'double'))
+        self.assertEqual(record['execution_options']['factorization'], 'adaptive')
+        bistatic = two_d_request([.6], [0.], 'meters', False, 'tight', 'bistatic', [30.])
+        self.assertEqual(bistatic['execution_options']['factorization'], 'dense')
+        for args in (([], [0.], 'meters', True, 'standard', 'monostatic', []),
+                     ([.6], [0.], 'feet', True, 'standard', 'monostatic', []),
+                     ([.6], [0.], 'meters', True, 'standard', 'bistatic', [])):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                two_d_request(*args)
 
-    def test_invalid_profiles_and_conflicting_driver_values_reject(self):
+    def test_invalid_profiles_reject(self):
         for value in ({'factorization': 'typo'}, {'ram_budget_gib': float('nan')},
                       {'blas_threads': True}, {'angle_batch_size': 257},
                       {'temporary_directory': '../temp'}, {'unknown': 1}):
@@ -148,8 +143,6 @@ class ExecutionOptionsTests(unittest.TestCase):
                 ('hierarchical','mixed','monostatic','direct'), ('compressed','double','bistatic','experimental_cpu')]:
             with self.assertRaises(ValueError):
                 validate_for_run(dict(factorization=mode), method, precision, scattering)
-        with self.assertRaisesRegex(ValueError, 'conflicts'):
-            reconcile_settings(dict(EXECUTION_OPTIONS=dict(blas_threads=2), BLAS_THREADS_PER_WORKER=4))
 
     def test_fresh_interpreter_uses_serialized_profile_with_qt_blocked(self):
         script = '''

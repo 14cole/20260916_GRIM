@@ -172,34 +172,27 @@ class WorkflowUpdatesTests(unittest.TestCase):
         self.assertEqual(ui.workflow_tabs.currentIndex(),3)
         self.assertTrue(ui.advanced_section.header.isChecked())
 
-    def test_2d_setup_roundtrip_and_invalid_load_rejected_atomically(self):
-        module=load_ghost_module('ghost_backend.runs.setup')
+    def test_2d_request_captures_physics_and_rejects_invalid_input(self):
         SolverTab=load_ghost_module('ghost_backend.ui.solver').SolverTab
         local=SolverTab()
-        restored=SolverTab()
-        self.widgets.extend([local,restored])
+        self.widgets.append(local)
         local.edit_freq_list.setText('1, 2.75')
         local.edit_elev_list.setText('-10, 0, 90')
         local.cmb_units.setCurrentText('meters')
         local.chk_mesh_certification.setChecked(True)
         local.cmb_accuracy_target.setCurrentIndex(local.cmb_accuracy_target.findData('tight'))
-        local.cmb_lu_precision.setCurrentIndex(local.cmb_lu_precision.findData('double'))
         value=local._capture_run_setup()
-        path=self.root/'target.run.json'
-        module.save_setup(path,value)
-        restored._apply_saved_run_setup(module.read_setup(path))
-        self.assertEqual(restored._capture_run_setup(),value)
-        other=copy.deepcopy(value)
-        other['scattering']='bistatic'
-        other['observation_angles_deg']=[0.,90.]
-        other['solver_method']='direct'
-        other['execution_options']['factorization']='dense'
-        other['execution_options']['mesh_strategy']='global'
-        local._apply_saved_run_setup(other)
-        self.assertEqual(local._capture_run_setup(),other)
-        bad=copy.deepcopy(value); bad['frequencies_ghz']=[float('nan')]
-        with self.assertRaisesRegex(ValueError,'finite'): local._apply_saved_run_setup(bad)
-        self.assertEqual(local._capture_run_setup(),other)
+        self.assertEqual((value['frequencies_ghz'],value['angles_deg'],value['units'],value['accuracy']),
+                         ([1.,2.75],[-10.,0.,90.],'meters','tight'))
+        self.assertEqual((value['solver_method'],value['execution_options']['factorization']),('auto','adaptive'))
+        local.cmb_scatter_mode.setCurrentIndex(local.cmb_scatter_mode.findData('bistatic'))
+        local.edit_obs_angles.setText('0, 90')
+        other=local._capture_run_setup()
+        self.assertEqual(other['observation_angles_deg'],[0.,90.])
+        self.assertEqual((other['solver_method'],other['execution_options']['factorization'],
+                          other['execution_options']['mesh_strategy']),('direct','dense','global'))
+        local.edit_freq_list.setText('nan')
+        with self.assertRaises(ValueError): local._capture_run_setup()
 
     def test_physical_dimensions_and_preflight_material_errors(self):
         module=load_ghost_module('ghost_backend.runs.setup')

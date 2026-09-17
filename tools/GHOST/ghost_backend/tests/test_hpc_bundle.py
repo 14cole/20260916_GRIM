@@ -62,13 +62,13 @@ class PortableBundleTests(unittest.TestCase):
     def tearDown(self) -> 'None':
         shutil.rmtree(self.temporary, ignore_errors=True)
 
-    def _create_2d(self, *, settings=None) -> 'tuple[Path, dict]':
+    def _create_request(self, *, settings=None) -> 'tuple[Path, dict]':
         source = _write_geometry(self.temporary / "source")
         target = self.temporary / "portable_request"
         request = hpc_bundle.create_portable_bundle(
             target,
-            solver="2d",
-            geometries=[{"role": "FRD", "path": str(source)}],
+            solver="bor",
+            geometries=[{"role": "BOR", "path": str(source)}],
             settings=settings
             or {
                 "FREQUENCIES_GHZ": [2.0, 4.0],
@@ -294,12 +294,12 @@ class PortableBundleTests(unittest.TestCase):
         self.assertIn("does not match this run", rejected["publication_error"])
 
     def test_create_is_relative_complete_and_self_documenting(self) -> 'None':
-        target, request = self._create_2d()
+        target, request = self._create_request()
         raw = (target / hpc_bundle.REQUEST_NAME).read_text(encoding="utf-8")
         self.assertEqual(request["schema"], hpc_bundle.REQUEST_SCHEMA)
         self.assertNotIn(str(self.temporary), raw)
         self.assertNotIn("C:\\", raw)
-        self.assertEqual(request["geometries"][0]["role"], "FRD")
+        self.assertEqual(request["geometries"][0]["role"], "BOR")
         self.assertEqual(len(request["geometries"][0]["sidecars"]), 1)
         readme = (target / hpc_bundle.README_NAME).read_text(encoding="utf-8")
         self.assertIn("hpc/bundle.py stage", readme)
@@ -317,10 +317,10 @@ class PortableBundleTests(unittest.TestCase):
         target = self.temporary / "two_geometries"
         request = hpc_bundle.create_portable_bundle(
             target,
-            solver="2d",
+            solver="bor",
             geometries=[
-                {"role": "FRD", "path": str(one)},
-                {"role": "OPN", "path": str(two)},
+                {"role": "BOR", "path": str(one)},
+                {"role": "BOR", "path": str(two)},
             ],
             settings={},
         )
@@ -334,24 +334,24 @@ class PortableBundleTests(unittest.TestCase):
         self.assertEqual(len(hashes), 2)
 
     def test_tampering_and_unexpected_files_fail_closed(self) -> 'None':
-        target, request = self._create_2d()
+        target, request = self._create_request()
         geometry = target.joinpath(*request["geometries"][0]["path"].split("/"))
         geometry.write_text(geometry.read_text(encoding="utf-8") + "# changed\n")
         with self.assertRaisesRegex(hpc_bundle.BundleError, "differs from its inventory"):
             hpc_bundle.verify_portable_bundle(target)
 
-        target, _request = self._create_2d_at(self.temporary / "second_bundle")
+        target, _request = self._create_request_at(self.temporary / "second_bundle")
         (target / "surprise.sh").write_text("echo no\n", encoding="utf-8")
         with self.assertRaisesRegex(hpc_bundle.BundleError, "exact inventory"):
             hpc_bundle.verify_portable_bundle(target)
 
-    def _create_2d_at(self, target: 'Path') -> 'tuple[Path, dict]':
+    def _create_request_at(self, target: 'Path') -> 'tuple[Path, dict]':
         source_root = self.temporary / f"source_{target.name}"
         source = _write_geometry(source_root)
         request = hpc_bundle.create_portable_bundle(
             target,
-            solver="2d",
-            geometries=[{"role": "FRD", "path": str(source)}],
+            solver="bor",
+            geometries=[{"role": "BOR", "path": str(source)}],
             settings={},
         )
         return target, request
@@ -369,25 +369,25 @@ class PortableBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(hpc_bundle.BundleError, "execution-owned"):
             hpc_bundle.create_portable_bundle(
                 self.temporary / "shell_injection",
-                solver="2d",
-                geometries=[{"role": "FRD", "path": str(source)}],
+                solver="bor",
+                geometries=[{"role": "BOR", "path": str(source)}],
                 settings={"JOB_PROLOGUE": ["curl bad | sh"]},
             )
         with self.assertRaisesRegex(hpc_bundle.BundleError, "conservative SLURM token"):
             hpc_bundle.create_portable_bundle(
                 self.temporary / "newline_injection",
-                solver="2d",
-                geometries=[{"role": "FRD", "path": str(source)}],
+                solver="bor",
+                geometries=[{"role": "BOR", "path": str(source)}],
                 settings={"SLURM_PARTITION": "compute\n/bin/false"},
             )
         with self.assertRaisesRegex(hpc_bundle.BundleError, "duplicate stem"):
             hpc_bundle.create_portable_bundle(
                 self.temporary / "duplicate_stem",
-                solver="2d",
+                solver="bor",
                 geometries=[
-                    {"role": "FRD", "path": str(source)},
+                    {"role": "BOR", "path": str(source)},
                     {
-                        "role": "OPN",
+                        "role": "BOR",
                         "path": str(_write_geometry(self.temporary / "other")),
                     },
                 ],
@@ -410,7 +410,6 @@ class PortableBundleTests(unittest.TestCase):
 
     def test_every_allowlisted_setting_exists_in_its_canonical_driver(self) -> 'None':
         for solver, driver in (
-            ("2d", hpc_bundle.TWOD_DRIVER),
             ("bor", hpc_bundle.BOR_DRIVER),
         ):
             assigned = set(
@@ -426,8 +425,18 @@ class PortableBundleTests(unittest.TestCase):
                 f"{solver} allowlist drifted from {Path(driver).name}",
             )
 
+    def test_two_dimensional_requests_are_rejected(self) -> 'None':
+        source = _write_geometry(self.temporary / "two_d")
+        with self.assertRaisesRegex(hpc_bundle.BundleError, "run_hpc_monostatic"):
+            hpc_bundle.create_portable_bundle(
+                self.temporary / "two_d_request",
+                solver="2d",
+                geometries=[{"role": "FRD", "path": str(source)}],
+                settings={},
+            )
+
     def test_request_path_traversal_is_rejected_before_read(self) -> 'None':
-        target, request = self._create_2d()
+        target, request = self._create_request()
         request["files"][0]["path"] = "../outside.geo"
         (target / hpc_bundle.REQUEST_NAME).write_text(
             json.dumps(request), encoding="utf-8"
@@ -436,7 +445,7 @@ class PortableBundleTests(unittest.TestCase):
             hpc_bundle.verify_portable_bundle(target)
 
     def test_stage_derives_linux_owned_execution_settings(self) -> 'None':
-        target, request = self._create_2d()
+        target, request = self._create_request()
         workspace = self.temporary / "workspace"
         with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
             result = hpc_bundle.stage_portable_bundle(target, workspace)
@@ -444,7 +453,7 @@ class PortableBundleTests(unittest.TestCase):
         self.assertFalse(result["driver_ran"])
         self.assertIsNone(result["run_dir"])
         driver = Path(result["driver_path"])
-        self.assertEqual(driver.read_bytes(), Path(hpc_bundle.TWOD_DRIVER).read_bytes())
+        self.assertEqual(driver.read_bytes(), Path(hpc_bundle.BOR_DRIVER).read_bytes())
         settings = json.loads(driver.with_suffix('.config.json').read_text(encoding='utf-8'))['settings']
         self.assertEqual(settings['OUTPUT_DIR'], str(Path(result['output_root'])))
         self.assertEqual(settings['PYTHON_EXE'], sys.executable)
@@ -457,7 +466,7 @@ class PortableBundleTests(unittest.TestCase):
         self.assertTrue(staged_geometry.is_file())
 
     def test_interrupted_initial_copy_never_publishes_partial_stage(self) -> 'None':
-        target, request = self._create_2d()
+        target, request = self._create_request()
         workspace = self.temporary / "workspace_atomic_stage"
 
         def interrupted_copy(_bundle_root, private_stage, _bundle_request):
@@ -511,7 +520,7 @@ class PortableBundleTests(unittest.TestCase):
         self.assertEqual(request["geometries"][0]["role"], "BOR")
 
     def test_driver_result_is_machine_readable_and_idempotent(self) -> 'None':
-        target, request = self._create_2d()
+        target, request = self._create_request()
         workspace = self.temporary / "workspace"
         calls = []
 
@@ -604,7 +613,7 @@ class PortableBundleTests(unittest.TestCase):
             os.fstat(captured_fds[-1])
 
     def test_concurrent_stage_submit_has_one_driver_invocation(self) -> 'None':
-        target, _request = self._create_2d()
+        target, _request = self._create_request()
         workspace = self.temporary / "workspace_concurrent"
         started = threading.Event()
         finish = threading.Event()
@@ -758,7 +767,7 @@ class PortableBundleTests(unittest.TestCase):
             successor.__exit__(None, None, None)
 
     def test_interrupted_submit_without_job_id_fails_closed(self) -> 'None':
-        target, _request = self._create_2d()
+        target, _request = self._create_request()
         workspace = self.temporary / "workspace_stale_state"
         with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
             staged = hpc_bundle.stage_portable_bundle(target, workspace)
@@ -788,7 +797,7 @@ class PortableBundleTests(unittest.TestCase):
         self.assertEqual(state["status"], "running")
 
     def test_terminal_state_without_result_is_recovered_not_resubmitted(self) -> 'None':
-        target, _request = self._create_2d()
+        target, _request = self._create_request()
         workspace = self.temporary / "workspace_terminal_recovery"
         with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
             staged = hpc_bundle.stage_portable_bundle(target, workspace)
@@ -819,7 +828,7 @@ class PortableBundleTests(unittest.TestCase):
         self.assertEqual(recovered["job_ids"], ["92345"])
 
     def test_interrupted_non_submitting_driver_can_retry(self) -> 'None':
-        target, _request = self._create_2d()
+        target, _request = self._create_request()
         workspace = self.temporary / "workspace_stale_planning"
         with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
             staged = hpc_bundle.stage_portable_bundle(target, workspace)
@@ -852,7 +861,7 @@ class PortableBundleTests(unittest.TestCase):
         self.assertEqual(state["status"], "complete")
 
     def test_stale_running_state_with_job_journal_refuses_resubmit(self) -> 'None':
-        target, _request = self._create_2d()
+        target, _request = self._create_request()
         workspace = self.temporary / "workspace_stale_submitted"
         with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
             staged = hpc_bundle.stage_portable_bundle(target, workspace)
@@ -888,11 +897,11 @@ class PortableBundleTests(unittest.TestCase):
         runner.assert_not_called()
 
     def test_staged_payload_rejects_extra_files_before_driver_execution(self) -> 'None':
-        target, _request = self._create_2d()
+        target, _request = self._create_request()
         workspace = self.temporary / "workspace_exact"
         with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
             staged = hpc_bundle.stage_portable_bundle(target, workspace)
-        extra = Path(staged["stage_dir"]) / "payload" / "FRD" / "surprise.geo"
+        extra = Path(staged["stage_dir"]) / "payload" / "BOR" / "surprise.geo"
         extra.write_text("# not declared\n", encoding="utf-8")
 
         with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True), \
@@ -904,7 +913,7 @@ class PortableBundleTests(unittest.TestCase):
         runner.assert_not_called()
 
     def test_driver_result_recovers_each_persisted_partial_job_id(self) -> 'None':
-        target, request = self._create_2d()
+        target, request = self._create_request()
         workspace = self.temporary / "workspace_partial"
 
         def fake_run(command, **kwargs):
@@ -935,7 +944,7 @@ class PortableBundleTests(unittest.TestCase):
         self.assertTrue(result["submitted"])
 
     def test_recover_reconstructs_interrupted_stage_without_resubmitting(self) -> 'None':
-        target, request = self._create_2d()
+        target, request = self._create_request()
         workspace = self.temporary / "workspace_recover"
         with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
             staged = hpc_bundle.stage_portable_bundle(target, workspace)
@@ -973,7 +982,7 @@ class PortableBundleTests(unittest.TestCase):
         self.assertEqual(recovered["stage_state"], "running")
 
     def test_recovery_running_state_and_journal_override_stale_result(self) -> 'None':
-        target, request = self._create_2d()
+        target, request = self._create_request()
         workspace = self.temporary / "workspace_stale_result"
         with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
             staged = hpc_bundle.stage_portable_bundle(target, workspace)
@@ -1036,7 +1045,7 @@ class PortableBundleTests(unittest.TestCase):
         self.assertLess(events.index("fsync"), events.index("replace"))
 
     def test_cli_emits_one_json_object(self) -> 'None':
-        target, request = self._create_2d()
+        target, request = self._create_request()
         output = io.StringIO()
         with redirect_stdout(output):
             returncode = hpc_bundle.main(["verify", str(target)])
@@ -1047,7 +1056,7 @@ class PortableBundleTests(unittest.TestCase):
         self.assertEqual(output.getvalue().count("\n"), 1)
 
     def test_windows_cannot_create_final_stage_provenance(self) -> 'None':
-        target, _request = self._create_2d()
+        target, _request = self._create_request()
         with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=False):
             with self.assertRaisesRegex(hpc_bundle.BundleError, "Linux login node"):
                 hpc_bundle.stage_portable_bundle(target, self.temporary / "workspace")

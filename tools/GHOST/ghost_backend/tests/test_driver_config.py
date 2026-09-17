@@ -1,4 +1,4 @@
-"""Configuration travels with unchanged drivers and remains bound to run identity."""
+"""BoR driver configuration travels with unchanged drivers and remains bound to run identity."""
 import json
 from pathlib import Path
 import sys
@@ -16,8 +16,7 @@ import ghost_backend.execution.provenance as workflow_provenance
 
 class DriverConfigurationTests(unittest.TestCase):
     def test_configuration_preserves_source_and_worker_fingerprint(self):
-        for name in ('run_hpc_monostatic.py', 'run_hpc_bor_monostatic.py',
-                     'run_local_monostatic.py', 'run_local_bor.py'):
+        for name in ('run_hpc_bor_monostatic.py', 'run_local_bor.py'):
             with self.subTest(driver=name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 source = BACKEND / name
@@ -45,37 +44,28 @@ class DriverConfigurationTests(unittest.TestCase):
             with self.subTest(settings=settings), tempfile.TemporaryDirectory() as temporary:
                 path = Path(temporary) / 'driver.py'
                 with self.assertRaises(ValueError):
-                    hpc_common.configure_driver(BACKEND / 'run_hpc_monostatic.py', path, settings)
+                    hpc_common.configure_driver(BACKEND / 'run_hpc_bor_monostatic.py', path, settings)
                 self.assertFalse(path.exists())
 
     def test_explicit_configuration_overrides_adjacent_path_and_rejects_wrong_solver(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root / 'explicit.json'
-            payload = config.configuration_payload('2d', {'OUTPUT_DIR': 'chosen'}, ['OUTPUT_DIR'])
+            payload = config.configuration_payload('bor', {'OUTPUT_DIR': 'chosen'}, ['OUTPUT_DIR'])
             config.write_configuration(path, payload)
             with mock.patch.object(sys, 'argv', ['driver.py', '--config', str(path)]):
                 namespace = {'__name__': '__main__'}
-                config.load_driver_configuration(namespace, root / 'driver.py', '2d', ['OUTPUT_DIR'])
+                config.load_driver_configuration(namespace, root / 'driver.py', 'bor', ['OUTPUT_DIR'])
                 self.assertEqual(namespace['OUTPUT_DIR'], 'chosen')
                 with self.assertRaisesRegex(ValueError, 'solver kind'):
-                    config.load_driver_configuration(namespace, root / 'driver.py', 'bor', ['OUTPUT_DIR'])
+                    config.load_driver_configuration(namespace, root / 'driver.py', '2d', ['OUTPUT_DIR'])
 
-    def test_desktop_recipe_maps_without_losing_unsupported_options(self):
-        from ghost_backend.runs.setup import DEFAULT_QUALITY
-        recipe = dict(schema='grim.2d-run-setup', version=1, frequencies_ghz=[1., 2.],
-                      angles_deg=[0., 90.], units='meters', mesh_certification=False,
-                      accuracy='tight', lu_precision='mixed', scattering='monostatic',
-                      observation_angles_deg=[], quality=DEFAULT_QUALITY)
-        settings = config.settings_from_run_setup(recipe, '2d')
-        self.assertEqual(settings['FREQUENCIES_GHZ'], [1., 2.])
-        self.assertFalse(settings['MESH_CERTIFICATION'])
-        with self.assertRaisesRegex(ValueError, 'BoR'):
-            config.settings_from_run_setup(recipe, 'bor')
-        with self.assertRaisesRegex(ValueError, 'monostatic'):
-            config.settings_from_run_setup(dict(recipe, scattering='bistatic', observation_angles_deg=[0.]), '2d')
-        with self.assertRaisesRegex(ValueError, 'conflicts'):
-            config.configuration_payload('2d', {'FREQUENCIES_GHZ': [3.]}, settings, run_setup=recipe)
+    def test_two_dimensional_drivers_have_no_json_configuration(self):
+        with self.assertRaisesRegex(ValueError, 'BoR drivers only'):
+            config.configuration_payload('2d', {'OUTPUT_DIR': 'chosen'}, ['OUTPUT_DIR'])
+        for name in ('run_hpc_monostatic.py', 'run_local_monostatic.py'):
+            with self.subTest(driver=name), self.assertRaisesRegex(ValueError, 'configuration contract'):
+                config.driver_contract(BACKEND / name)
 
 
 if __name__ == '__main__':

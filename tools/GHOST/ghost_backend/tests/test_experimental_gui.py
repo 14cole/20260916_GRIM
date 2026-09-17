@@ -44,26 +44,18 @@ class ExperimentalGUI(unittest.TestCase):
                 bor.run()
                 run.assert_called_once_with()
 
-    def test_selection_and_recipe_roundtrip(self):
+    def test_tab_request_carries_only_physical_choices(self):
         workspace = GhostWorkspace()
         try:
             tab = workspace.solver_tab
-            self.assertEqual(tab.cmb_solver_method.currentData(), 'auto')
-            self.assertEqual(tab.execution_options_widget.value()['factorization'], 'adaptive')
-            tab.execution_options_widget.set_value(dict(factorization='dense'))
-            tab.cmb_solver_method.setCurrentIndex(tab.cmb_solver_method.findData('direct'))
-            tab.cmb_lu_precision.setCurrentIndex(tab.cmb_lu_precision.findData('mixed'))
-            tab.cmb_solver_method.setCurrentIndex(tab.cmb_solver_method.findData('experimental_cpu'))
-            self.assertEqual(tab.cmb_lu_precision.currentData(), 'double')
-            self.assertFalse(tab.cmb_lu_precision.isEnabled())
-            recipe = tab._capture_run_setup()
-            self.assertEqual(recipe['solver_method'], 'experimental_cpu')
-            tab.cmb_solver_method.setCurrentIndex(0)
-            tab._apply_saved_run_setup(recipe)
-            self.assertEqual(tab.cmb_solver_method.currentData(), 'experimental_cpu')
-            tab.cmb_scatter_mode.setCurrentIndex(tab.cmb_scatter_mode.findData('bistatic'))
-            self.assertEqual(tab.cmb_solver_method.currentData(), 'direct')
-            self.assertFalse(tab.cmb_solver_method.isEnabled())
+            tab.chk_mesh_certification.setChecked(False)
+            tab.cmb_accuracy_target.setCurrentIndex(tab.cmb_accuracy_target.findData('tight'))
+            request = tab._capture_run_setup()
+            self.assertEqual((request['mesh_certification'], request['accuracy']), (False, 'tight'))
+            self.assertEqual((request['solver_method'], request['lu_precision']), ('auto', 'double'))
+            tab.cmb_solver_kind.setCurrentIndex(tab.cmb_solver_kind.findData('bor'))
+            self.assertEqual(tab._capture_run_setup()['schema'], 'grim.bor-run-setup')
+            self.assertTrue(tab.bor_options_widget.isVisibleTo(tab))
         finally:
             workspace.close()
 

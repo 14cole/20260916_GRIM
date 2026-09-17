@@ -89,13 +89,13 @@ class CompactLayoutTests(unittest.TestCase):
                 with self.subTest(tab=tab, control=name):
                     self.assertTrue(viewport.rect().contains(bounds), (bounds, viewport.rect()))
 
-    def test_solver_actions_stay_visible_with_advanced_form_scrolled(self):
+    def test_solver_actions_stay_visible_with_tools_scrolled(self):
         self.window.resize(1280, 680)
         self.window.main_tabs.setCurrentWidget(self.window.ghost_integration)
         ghost = self.window.ghost_integration.workspace
         solver = ghost.solver_tab
         ghost.setCurrentWidget(solver)
-        solver.btn_advanced_settings.setChecked(True)
+        solver.btn_tools.setChecked(True)
         self.window.show()
         self.app.processEvents()
         self.assertEqual(self.window.size(), QSize(1280, 680))

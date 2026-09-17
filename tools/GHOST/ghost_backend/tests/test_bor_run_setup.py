@@ -1,10 +1,9 @@
 """BOR recipes preserve physics across local and HPC coordinate conventions."""
 from pathlib import Path
-import copy, sys, tempfile, unittest
+import sys, unittest
 import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from ghost_backend.runs.setup import validate_setup, save_setup, read_setup
-from ghost_backend.runs.bor_setup import driver_settings, resource_summary
+from ghost_backend.runs.bor_setup import driver_settings, resource_summary, validate_bor_setup
 from ghost_backend.runs.config import configuration_payload, driver_contract
 from ghost_backend.assembly.fields import radar_grid_aspects
 
@@ -17,12 +16,8 @@ def recipe():
 
 
 class BorRunSetupTests(unittest.TestCase):
-    def test_recipe_round_trip_and_driver_coordinate_mapping(self):
-        value=validate_setup(recipe())
-        with tempfile.TemporaryDirectory() as directory:
-            path=Path(directory)/'sphere.run.json'
-            save_setup(path,value)
-            self.assertEqual(read_setup(path),value)
+    def test_recipe_driver_coordinate_mapping(self):
+        value=validate_bor_setup(recipe())
         settings=driver_settings(value)
         self.assertEqual(settings['AZIMUTHS_DEG'],[0.])
         self.assertEqual(settings['ELEVATIONS_DEG'],[90.,59.,0.,-90.])
@@ -47,14 +42,14 @@ class BorRunSetupTests(unittest.TestCase):
         self.assertEqual(settings['ELEVATIONS_DEG'],[-10.,10.])
         self.assertEqual(settings['BODY_ROLL_DEG'],22.5)
         value['aspects_deg'][0]+=1.
-        with self.assertRaisesRegex(ValueError,'do not match'):validate_setup(value)
+        with self.assertRaisesRegex(ValueError,'do not match'):validate_bor_setup(value)
 
     def test_invalid_recipe_cannot_change_solver_or_numeric_contract(self):
         for changes in ({'aspects_deg':[-1.]},{'cfie_alpha':0.},{'units':'feet'},
                         {'frequencies_ghz':[float('nan')]},{'bor_options':{'tile_cache_mib':-1}},
                         {'scattering':'bistatic'}):
-            with self.assertRaises(ValueError):validate_setup(dict(recipe(),**changes))
-        with self.assertRaisesRegex(ValueError,'2-D'):
+            with self.assertRaises(ValueError):validate_bor_setup(dict(recipe(),**changes))
+        with self.assertRaisesRegex(ValueError,'BoR drivers only'):
             configuration_payload('2d',{},[],run_setup=recipe())
 
     def test_preflight_is_geometry_only_and_cancellable(self):

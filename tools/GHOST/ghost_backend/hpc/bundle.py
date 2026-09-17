@@ -1,4 +1,4 @@
-"""Create, verify, stage, and submit portable HPC requests."""
+"""Create, verify, stage, and submit portable BoR HPC requests."""
 if not __package__:
     import sys
     from pathlib import Path
@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - exercised on POSIX
 
 from ghost_backend.execution.runtime import write_text_lf
 from ghost_backend.geometry.io import material_sidecar_paths
-from ghost_backend.hpc.common import BOR_DRIVER, TWOD_DRIVER, configure_driver
+from ghost_backend.hpc.common import BOR_DRIVER, configure_driver
 
 
 REQUEST_SCHEMA = "ghost.hpc.portable-request.v1"
@@ -77,19 +77,9 @@ _COMMON_SETTINGS = {
     "CLAIM_STALE_SECONDS",
 }
 
+# 2-D sweeps run through run_hpc_monostatic.py directly; portable bundles carry
+# BoR requests only.
 _SETTINGS_BY_SOLVER = {
-    "2d": _COMMON_SETTINGS | {
-        "SOLVE_PRESET",
-        "ADVANCED_OVERRIDES",
-        "EXECUTION_OPTIONS",
-        "ARRAY_THROTTLE",
-        "MEMORY_SAFETY",
-        "MAX_SOLVE_GB",
-        "MAX_PANELS",
-        "LU_PRECISION",
-        "SOLVER_METHOD",
-        "ASSEMBLY_THREADS",
-    },
     "bor": _COMMON_SETTINGS | {
         "BOR_EXECUTION_OPTIONS",
         "ELEVATIONS_DEG",
@@ -110,7 +100,6 @@ _SETTINGS_BY_SOLVER = {
 _POSITIVE_INTS = {
     "N_NODES",
     "N_JOBS",
-    "MAX_PANELS",
     "MAX_ELEMENTS",
     "WORKERS_PER_UNIT",
     "BLAS_THREADS_PER_WORKER",
@@ -118,7 +107,6 @@ _POSITIVE_INTS = {
     "CLAIM_STALE_SECONDS",
 }
 _OPTIONAL_POSITIVE_INTS = {
-    "ARRAY_THROTTLE",
     "CORES_PER_NODE",
     "MAX_WORKERS_PER_NODE",
     "N_MODES",
@@ -129,7 +117,6 @@ _FINITE_NUMBERS = {
     "BODY_ROLL_DEG",
 }
 _POSITIVE_NUMBERS = {
-    "MAX_SOLVE_GB",
     "MODE_TOL",
     "STREAM_BUDGET_GB",
 }
@@ -603,18 +590,11 @@ def _validate_slurm_text(value: 'Any', *, name: 'str', optional: 'bool' = False)
 
 def _validate_settings(solver: 'str', raw_settings: 'Any') -> 'Dict[str, Any]':
     if solver not in _SETTINGS_BY_SOLVER:
-        raise BundleError("solver must be exactly '2d' or 'bor'.")
+        raise BundleError("solver must be exactly 'bor'; run 2-D sweeps with run_hpc_monostatic.py.")
     if not isinstance(raw_settings, dict):
         raise BundleError("settings must be a JSON object.")
     settings = dict(raw_settings)
-    if solver == '2d':
-        from ghost_backend.runs.execution import reconcile_settings
-        from ghost_backend.runs.presets import resolve_preset
-        try:
-            settings = reconcile_settings(resolve_preset(settings))
-        except ValueError as exc:
-            raise BundleError(str(exc))
-    elif 'BOR_EXECUTION_OPTIONS' in settings:
+    if 'BOR_EXECUTION_OPTIONS' in settings:
         from ghost_backend.bor.options import validate_options
         try:
             settings['BOR_EXECUTION_OPTIONS'] = validate_options(settings['BOR_EXECUTION_OPTIONS'])
@@ -749,7 +729,7 @@ def _copy_geometry_payload(
     geometries: 'Sequence[Mapping[str, Any]]',
     solver: 'str',
 ) -> 'Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]':
-    allowed_roles = {"FRD", "OPN"} if solver == "2d" else {"BOR"}
+    allowed_roles = {"BOR"}
     if not isinstance(geometries, Sequence) or isinstance(geometries, (str, bytes)):
         raise BundleError("geometries must be a non-empty sequence.")
     if not geometries:
@@ -938,7 +918,7 @@ def verify_portable_bundle(bundle_dir: 'os.PathLike[str] | str') -> 'Dict[str, A
         raise BundleError("request.json has no valid lowercase hexadecimal bundle_id.")
     solver = request.get("solver")
     if solver not in _SETTINGS_BY_SOLVER:
-        raise BundleError("request.json solver must be exactly '2d' or 'bor'.")
+        raise BundleError("request.json solver must be exactly 'bor'.")
     _validate_settings(str(solver), request.get("settings"))
 
     raw_files = request.get("files")
@@ -992,7 +972,7 @@ def verify_portable_bundle(bundle_dir: 'os.PathLike[str] | str') -> 'Dict[str, A
     raw_geometries = request.get("geometries")
     if not isinstance(raw_geometries, list) or not raw_geometries:
         raise BundleError("request.json geometries must be a non-empty array.")
-    allowed_roles = {"FRD", "OPN"} if solver == "2d" else {"BOR"}
+    allowed_roles = {"BOR"}
     geometry_paths = set()
     material_paths = set()
     stems = set()
@@ -1412,18 +1392,10 @@ def _stage_portable_bundle_with_lease(
     output_root = stage_dir / "runs"
     output_root.mkdir(parents=True, exist_ok=True)
     settings = dict(request["settings"])
-    if request["solver"] == "2d":
-        frd_root = payload_root / "FRD"
-        opn_root = payload_root / "OPN"
-        frd_root.mkdir(parents=True, exist_ok=True)
-        opn_root.mkdir(parents=True, exist_ok=True)
-        settings.update({"FRD_DIR": str(frd_root), "OPN_DIR": str(opn_root)})
-        canonical_driver = TWOD_DRIVER
-    else:
-        bor_root = payload_root / "BOR"
-        bor_root.mkdir(parents=True, exist_ok=True)
-        settings["GEOMETRY_DIRS"] = [str(bor_root)]
-        canonical_driver = BOR_DRIVER
+    bor_root = payload_root / "BOR"
+    bor_root.mkdir(parents=True, exist_ok=True)
+    settings["GEOMETRY_DIRS"] = [str(bor_root)]
+    canonical_driver = BOR_DRIVER
     settings.update(
         {
             "OUTPUT_DIR": str(output_root),
@@ -1745,7 +1717,7 @@ def main(argv: 'Optional[Sequence[str]]' = None) -> 'int':
     subparsers.required = True
 
     create_parser = subparsers.add_parser("create", help="Create a portable bundle.")
-    create_parser.add_argument("--solver", required=True, choices=("2d", "bor"))
+    create_parser.add_argument("--solver", required=True, choices=("bor",))
     create_parser.add_argument("--output", required=True)
     create_parser.add_argument("--settings", required=True, help="JSON settings file.")
     create_parser.add_argument(

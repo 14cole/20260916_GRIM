@@ -232,9 +232,10 @@ def test_polarization_aliases():
     import run_local_monostatic as local_driver
     check(
         not hasattr(local_driver, "POLARIZATIONS")
-        and local_driver.SOLVER_METHOD == "auto"
+        and not hasattr(local_driver, "SOLVER_METHOD")
+        and not hasattr(local_driver, "SOLVE_PRESET")
         and not hasattr(local_driver, "CFIE_ALPHA"),
-        "2-D driver defaults to Automatic and exposes no polarization or dead CFIE control",
+        "2-D driver is always automatic and exposes no solver, polarization or dead CFIE control",
     )
 
 

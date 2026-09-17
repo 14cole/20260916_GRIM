@@ -1,4 +1,4 @@
-"""Validated JSON configuration for the existing local and HPC driver entrypoints."""
+"""Validated JSON configuration for the BoR local and HPC driver entrypoints."""
 
 import argparse
 import ast
@@ -25,20 +25,18 @@ class LoadedConfiguration:
             raise ValueError('Driver configuration changed after loading. Restart with a stable configuration.')
 
 
-OPTIONAL_INTS = {'WORKERS', 'N_MODES', 'ARRAY_THROTTLE', 'CORES_PER_NODE', 'MAX_WORKERS_PER_NODE'}
-POSITIVE_INTS = {'N_NODES', 'N_JOBS', 'MAX_PANELS', 'MAX_ELEMENTS',
+OPTIONAL_INTS = {'WORKERS', 'N_MODES', 'CORES_PER_NODE', 'MAX_WORKERS_PER_NODE'}
+POSITIVE_INTS = {'N_NODES', 'N_JOBS', 'MAX_ELEMENTS',
                  'BLAS_THREADS_PER_WORKER', 'WORKERS_PER_UNIT', 'TASKS_PER_CHILD'}
 OPTIONAL_TEXT = {'SLURM_ACCOUNT', 'SLURM_QOS', 'SLURM_TIME', 'MEM_PER_NODE',
                  'SLURM_MAIL_TYPE', 'SLURM_MAIL_USER'}
-TEXT = {'FRD_DIR', 'OPN_DIR', 'OUTPUT_DIR', 'SLURM_PARTITION', 'PYTHON_EXE'}
+TEXT = {'OUTPUT_DIR', 'SLURM_PARTITION', 'PYTHON_EXE'}
 NUMERIC_LISTS = {'FREQUENCIES_GHZ', 'AZIMUTHS_DEG', 'ELEVATIONS_DEG'}
 TEXT_LISTS = {'GEOMETRY_DIRS', 'GEOMETRY_EXTS', 'SLURM_EXTRA_SBATCH', 'JOB_PROLOGUE'}
 NUMBERS = {'BODY_AXIS_AZ_DEG', 'BODY_AXIS_EL_DEG', 'BODY_ROLL_DEG', 'CFIE_ALPHA',
-           'MODE_TOL', 'STREAM_BUDGET_GB', 'MEMORY_HEADROOM', 'MEMORY_SAFETY',
-           'CLAIM_STALE_SECONDS', 'MAX_SOLVE_GB'}
-CHOICES = {'SOLVER_METHOD': ('auto', 'direct', 'experimental_cpu'), 'GEOMETRY_UNITS': ('inches', 'meters'), 'ACCURACY_TARGET': ('standard', 'tight'),
-           'LU_PRECISION': ('double', 'mixed'), 'ASSEMBLY': ('auto', 'tables', 'streaming'),
-           'TABLE_PRECISION': ('auto', 'single', 'double')}
+           'MODE_TOL', 'STREAM_BUDGET_GB', 'MEMORY_HEADROOM', 'CLAIM_STALE_SECONDS'}
+CHOICES = {'GEOMETRY_UNITS': ('inches', 'meters'), 'ACCURACY_TARGET': ('standard', 'tight'),
+           'ASSEMBLY': ('auto', 'tables', 'streaming'), 'TABLE_PRECISION': ('auto', 'single', 'double')}
 
 
 def validate_settings(settings, allowed_keys):
@@ -50,18 +48,7 @@ def validate_settings(settings, allowed_keys):
     result = {}
     for key, value in settings.items():
         valid = False
-        if key == 'SOLVE_PRESET':
-            from ghost_backend.runs.presets import PRESETS
-            valid = value in PRESETS if isinstance(value, str) else False
-        elif key == 'ADVANCED_OVERRIDES':
-            from ghost_backend.runs.presets import validate_overrides
-            value = validate_overrides(value)
-            valid = True
-        elif key == 'EXECUTION_OPTIONS':
-            from ghost_backend.execution.options import validate_options
-            value = validate_options(value)
-            valid = True
-        elif key == 'BOR_EXECUTION_OPTIONS':
+        if key == 'BOR_EXECUTION_OPTIONS':
             from ghost_backend.bor.options import validate_options
             value = validate_options(value)
             valid = True
@@ -85,7 +72,7 @@ def validate_settings(settings, allowed_keys):
                 if key in {'GEOMETRY_DIRS', 'GEOMETRY_EXTS'}:
                     valid = bool(value) and all(v.strip() for v in value)
         elif key in NUMBERS:
-            valid = (key == 'MAX_SOLVE_GB' and value is None) or (type(value) in (float, int) and math.isfinite(value))
+            valid = type(value) in (float, int) and math.isfinite(value)
             if valid and value is not None:
                 if key == 'MEMORY_HEADROOM':
                     valid = 0 < value <= 1
@@ -101,13 +88,9 @@ def validate_settings(settings, allowed_keys):
             valid = isinstance(value, str) and value in CHOICES[key]
         elif key in {'MESH_CERTIFICATION', 'SUBMIT'}:
             valid = type(value) is bool
-        elif key == 'ASSEMBLY_THREADS':
-            valid = value == 'auto' or (type(value) is int and value >= 1)
         if not valid:
             raise ValueError(f'Invalid driver setting {key}: {value!r}')
         result[key] = value
-    if result.get('SOLVER_METHOD') == 'experimental_cpu' and result.get('LU_PRECISION', 'double') != 'double':
-        raise ValueError('Experimental CPU requires double LU precision.')
     if (result.get('BOR_EXECUTION_OPTIONS', {}).get('factorization') == 'compressed'
             and result.get('TABLE_PRECISION') == 'single'):
         raise ValueError('Compressed BOR assembly requires double precision.')
@@ -115,42 +98,22 @@ def validate_settings(settings, allowed_keys):
 
 
 def settings_from_run_setup(value, kind):
-    """Reuse a matching desktop recipe for the monostatic driver capabilities."""
-    from ghost_backend.runs.setup import DEFAULT_QUALITY, validate_setup
-    if isinstance(value, dict) and value.get('schema') == 'grim.bor-run-setup':
-        if kind != 'bor':
-            raise ValueError('A BOR run setup cannot configure a 2-D driver.')
-        from ghost_backend.runs.bor_setup import driver_settings
-        return driver_settings(value)
-    if kind != '2d':
-        raise ValueError('A 2-D run setup cannot configure a BoR driver.')
-    setup = validate_setup(value)
-    if setup['scattering'] != 'monostatic' or setup['quality'] != DEFAULT_QUALITY:
-        raise ValueError('Batch drivers require a monostatic setup with their standard quality thresholds.')
-    return dict(FREQUENCIES_GHZ=setup['frequencies_ghz'], AZIMUTHS_DEG=setup['angles_deg'],
-                GEOMETRY_UNITS=setup['units'], MESH_CERTIFICATION=setup['mesh_certification'],
-                ACCURACY_TARGET=setup['accuracy'], LU_PRECISION=setup['lu_precision'],
-                SOLVER_METHOD=setup.get('solver_method', 'direct'),
-                EXECUTION_OPTIONS=setup['execution_options'])
+    """Reuse a BoR desktop recipe for the monostatic driver capabilities."""
+    if kind != 'bor' or not isinstance(value, dict) or value.get('schema') != 'grim.bor-run-setup':
+        raise ValueError('Only BoR drivers accept an embedded BoR run setup.')
+    from ghost_backend.runs.bor_setup import driver_settings
+    return driver_settings(value)
 
 
 def configuration_payload(kind, settings, allowed_keys, *, run_setup=None):
-    if kind not in ('2d', 'bor'):
-        raise ValueError('Driver kind must be 2d or bor.')
+    if kind != 'bor':
+        raise ValueError('Driver configuration files are supported for BoR drivers only.')
     merged = settings_from_run_setup(run_setup, kind) if run_setup is not None else {}
     checked = validate_settings(settings, allowed_keys)
     for key in merged.keys() & checked.keys():
         if merged[key] != checked[key]:
             raise ValueError(f'Driver setting {key} conflicts with the embedded run setup.')
     merged.update(checked)
-    if kind == '2d' and 'SOLVE_PRESET' in allowed_keys:
-        from ghost_backend.runs.presets import resolve_preset
-        merged = resolve_preset(merged)
-    if (kind == '2d' and merged.get('LU_PRECISION') == 'mixed' and
-            'SOLVER_METHOD' not in merged and 'SOLVER_METHOD' in allowed_keys):
-        merged['SOLVER_METHOD'] = 'direct'
-    from ghost_backend.runs.execution import reconcile_settings
-    merged = reconcile_settings(merged)
     return dict(schema=SCHEMA, version=1, driver=kind,
                 settings=validate_settings(merged, allowed_keys))
 

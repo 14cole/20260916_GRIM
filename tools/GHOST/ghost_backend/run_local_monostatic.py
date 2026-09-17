@@ -25,7 +25,9 @@ if not __package__:
     if Path(__file__).resolve().parent.name == "ghost_backend":
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ghost_backend.execution.paths import backend_root as _backend_root
-from ghost_backend.execution.options import current_options, efficient_defaults
+from ghost_backend.execution.options import (
+    AUTOMATIC_LU_PRECISION, AUTOMATIC_SOLVER_METHOD, current_options,
+)
 from ghost_backend.runs.execution import driver_execution, unit_execution
 
 import json
@@ -70,100 +72,31 @@ OPN_DIR = "ghost_backend/geometry/geometries/OPN"
 FREQUENCIES_GHZ = [2.0, 4.0, 6.0, 8.0, 10.0]
 AZIMUTHS_DEG    = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
 
-# Solve configuration: one preset shared with the desktop geometry presets.
-# auto: minimize predicted batch completion time using dense/compressed workers.
-# small: reference/dense, no basis reuse; balanced: streaming/dense;
-# large: streaming/compressed. All named presets use double precision.
-SOLVE_PRESET = "auto"             # "auto" | "small" | "balanced" | "large"
-# Optional execution fields, e.g. {"assembly_threads": 2, "angle_batch_size": 128}.
-# Leave empty for preset defaults. See RUN_PROFILES.md for supported overrides.
-ADVANCED_OVERRIDES = {}
-
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "ghost_backend/results/rcs_runs"
 
-# Hard ceiling on concurrent solves. None -> max(1, cpu_count() - 1). The
-# memory budget below is usually the binding constraint, so this rarely needs
-# setting.
-WORKERS = None
-
-# Solver accuracy; presets retain these choices.
 GEOMETRY_UNITS = "inches"         # "inches" | "meters"
-MAX_PANELS = 50_000
-MESH_CERTIFICATION = True        # compare base/refined meshes before export
+MESH_CERTIFICATION = True        # True: compare base/fine meshes. False: one uncertified mesh.
 ACCURACY_TARGET = "standard"     # "standard" | "tight"
 
-# --- Memory admission ------------------------------------------------------
-# A local machine has far less RAM than a compute node and is usually running
-# other things, so the same guard the cluster path uses matters more here, not
-# less. Concurrent solves are admitted while their estimated peaks fit the
-# budget; one unit is always admitted, so a solve larger than the whole budget
-# still runs (and fails loudly from the solver's own gate) instead of hanging.
-MEMORY_HEADROOM = 0.75            # fraction of detected RAM the scheduler may
-                                  # reserve for solves. Lower than the cluster
-                                  # default of 0.85: a workstation has a
-                                  # desktop, a browser, and a page cache to
-                                  # leave room for.
-MEMORY_SAFETY   = 1.35            # Dense: whole-estimate margin. Compressed:
-                                  # sampled operator margin only; inverse and
-                                  # phase workspaces are already accounted for.
-MAX_SOLVE_GB    = None            # Hard ceiling on ONE solve's estimated
-                                  # footprint (GHOST_MAX_SOLVE_GB). None =
-                                  # derive it from available RAM (0.9 x available,
-                                  # with no minimum floor). Set it to run something
-                                  # deliberately larger than this machine's RAM
-                                  # against swap, or to refuse earlier.
-
-# Pool worker lifetime, in units, so allocator growth from a big solve cannot
-# accumulate across a long sweep. The solver is imported in the parent, so a
-# respawn costs a fork rather than a re-import of numpy, SciPy, and the solver.
-TASKS_PER_CHILD = 4
-
-GEOMETRY_EXTS = (".geo",)
+# Optional resource caps. The backend, mesh, threads and memory admission are
+# chosen automatically for each solve.
+WORKERS = None                    # max concurrent solves; None = cpu_count() - 1
+MAX_SOLVE_GB = None               # per-solve RAM ceiling in GiB; None = from available RAM
 
 # ===============================================================================
 
-from ghost_backend.runs.config import (
-    load_driver_configuration,
-    configuration_source_records,
-    copy_configuration,
-)
-_CONFIG_KIND = '2d'
-# Legacy custom profiles remain supported by --config and old request bundles.
-# For direct edits to these aliases, set SOLVE_PRESET="custom". Named presets
-# use ADVANCED_OVERRIDES for execution settings and MAX_SOLVE_GB for RAM.
-SOLVER_METHOD = "auto"
-LU_PRECISION = "double"
-BLAS_THREADS_PER_WORKER = efficient_defaults()['blas_threads']
-ASSEMBLY_THREADS = efficient_defaults()['assembly_threads']
-EXECUTION_OPTIONS = None
-
-_CONFIG_KEYS = (
-    'SOLVE_PRESET',
-    'ADVANCED_OVERRIDES',
-    'EXECUTION_OPTIONS',
-    'FRD_DIR',
-    'OPN_DIR',
-    'FREQUENCIES_GHZ',
-    'AZIMUTHS_DEG',
-    'OUTPUT_DIR',
-    'WORKERS',
-    'GEOMETRY_UNITS',
-    'MAX_PANELS',
-    'BLAS_THREADS_PER_WORKER',
-    'MESH_CERTIFICATION',
-    'ACCURACY_TARGET',
-    'LU_PRECISION',
-    'SOLVER_METHOD',
-    'MEMORY_HEADROOM',
-    'MEMORY_SAFETY',
-    'MAX_SOLVE_GB',
-    'ASSEMBLY_THREADS',
-    'TASKS_PER_CHILD',
-    'GEOMETRY_EXTS',
-)
-_ACTIVE_CONFIG_PATH = load_driver_configuration(globals(), __file__, _CONFIG_KIND, _CONFIG_KEYS)
-
+# Internal scheduling constants.
+# Fraction of detected RAM the scheduler may reserve for solves; a workstation
+# keeps room for its desktop and page cache.
+_MEMORY_HEADROOM = 0.75
+# Dense: whole-estimate margin. Compressed: sampled operator margin only.
+_MEMORY_SAFETY = 1.35
+_MAX_PANELS = 100_000
+# Pool workers are replaced after this many units so allocator growth from a
+# big solve cannot accumulate across a long sweep.
+_TASKS_PER_CHILD = 4
+_GEOMETRY_EXTS = (".geo",)
 
 MANIFEST_SCHEMA = "ghost.local.2d-run.v3"
 OUTPUT_POLARIZATIONS = ("VV", "HH")
@@ -175,7 +108,7 @@ _SNAPSHOT_CACHE = {}  # type: Dict[str, Tuple[Dict[str, Any], str]]
 
 def _solver_source_records() -> 'Tuple[str, Dict[str, str]]':
     backend_dir = str(_backend_root())
-    return backend_dir, configuration_source_records(__file__, _ACTIVE_CONFIG_PATH)
+    return backend_dir, {'driver_configured.py': str(Path(__file__).resolve())}
 
 
 def _solver_source_fingerprint() -> 'str':
@@ -255,7 +188,7 @@ def _discover_geometries() -> 'List[Path]':
         if not root.is_dir():
             print(f"  [warn] dir not found: {root}", file=sys.stderr)
             continue
-        for ext in GEOMETRY_EXTS:
+        for ext in _GEOMETRY_EXTS:
             for p in sorted(root.rglob(f"*{ext}")):
                 rp = p.resolve()
                 if rp in seen:
@@ -389,8 +322,8 @@ def _plan(units, fine_factor, n_angles, records_out=None):
     for geometry, group in grouped.items():
         batch = hpc_scheduler.predict_2d_resources_many(geometry,
             sorted({float(u['frequency_ghz']) for u in group}), ['TM', 'TE'],
-            GEOMETRY_UNITS, MAX_PANELS, fine_factor=fine_factor,
-            n_angles=n_angles, safety=float(MEMORY_SAFETY), solver_method=SOLVER_METHOD)
+            GEOMETRY_UNITS, _MAX_PANELS, fine_factor=fine_factor,
+            n_angles=n_angles, safety=_MEMORY_SAFETY, solver_method=AUTOMATIC_SOLVER_METHOD)
         for unit in group:
             name = _unit_name(unit)
             plans = [batch[(float(unit['frequency_ghz']), pol)] for pol in ('TM', 'TE')]
@@ -407,19 +340,15 @@ def _unit_assembly_threads(
     """Thread count/CPU reservation derived from this unit's own footprint."""
 
     return hpc_scheduler.assembly_threads_for_unit(
-        cores, pool_size, budget_gb, peak_gb, configured=ASSEMBLY_THREADS
+        cores, pool_size, budget_gb, peak_gb, configured=current_options()['assembly_threads']
     )
 
 
 def _validate_config() -> 'Tuple[List[float], List[float]]':
     if ACCURACY_TARGET not in ("standard", "tight"):
         sys.exit("ERROR: ACCURACY_TARGET must be 'standard' or 'tight'.")
-    if SOLVER_METHOD not in ("auto", "direct", "experimental_cpu"):
-        sys.exit("ERROR: SOLVER_METHOD must be direct, auto, or experimental_cpu.")
-    if SOLVER_METHOD == "experimental_cpu" and LU_PRECISION != "double":
-        sys.exit("ERROR: experimental_cpu requires LU_PRECISION=double.")
-    if LU_PRECISION not in ("double", "mixed"):
-        sys.exit("ERROR: LU_PRECISION must be 'double' or 'mixed'.")
+    if type(MESH_CERTIFICATION) is not bool:
+        sys.exit("ERROR: MESH_CERTIFICATION must be True or False.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     if not AZIMUTHS_DEG:    sys.exit("ERROR: AZIMUTHS_DEG is empty.")
     frequencies = [float(value) for value in FREQUENCIES_GHZ]
@@ -440,18 +369,8 @@ def _validate_config() -> 'Tuple[List[float], List[float]]':
         sys.exit("ERROR: AZIMUTHS_DEG must be finite and unique.")
     if str(GEOMETRY_UNITS).strip().lower() not in {"inches", "meters"}:
         sys.exit("ERROR: GEOMETRY_UNITS must be 'inches' or 'meters'.")
-    if int(MAX_PANELS) < 1 or int(BLAS_THREADS_PER_WORKER) < 1:
-        sys.exit("ERROR: MAX_PANELS and BLAS_THREADS_PER_WORKER must be >= 1.")
-    if not 0.0 < float(MEMORY_HEADROOM) <= 1.0:
-        sys.exit("ERROR: MEMORY_HEADROOM must be in (0, 1].")
-    if float(MEMORY_SAFETY) < 1.0:
-        sys.exit("ERROR: MEMORY_SAFETY must be >= 1.")
     if MAX_SOLVE_GB is not None and float(MAX_SOLVE_GB) <= 0.0:
         sys.exit("ERROR: MAX_SOLVE_GB must be positive or None.")
-    if ASSEMBLY_THREADS != "auto" and int(ASSEMBLY_THREADS) < 1:
-        sys.exit("ERROR: ASSEMBLY_THREADS must be 'auto' or an integer >= 1.")
-    if int(TASKS_PER_CHILD) < 1:
-        sys.exit("ERROR: TASKS_PER_CHILD must be >= 1.")
     if WORKERS is not None and int(WORKERS) < 1:
         sys.exit("ERROR: WORKERS must be a positive integer or None.")
     return frequencies, azimuths
@@ -464,7 +383,8 @@ def main() -> 'None':
         # Read by the solver's own memory gate, in this process and every
         # forked worker.
         os.environ["GHOST_MAX_SOLVE_GB"] = f"{float(MAX_SOLVE_GB):g}"
-    hpc_scheduler.pin_blas_threads(int(BLAS_THREADS_PER_WORKER))
+    blas_threads = int(current_options()['blas_threads'])
+    hpc_scheduler.pin_blas_threads(blas_threads)
     hpc_scheduler.install_fingerprint_cache()
 
     geometries = _discover_geometries()
@@ -504,16 +424,15 @@ def main() -> 'None':
     (results_dir / "FRD").mkdir()
     (results_dir / "OPN").mkdir()
     solver_config = {
-        "solve_preset": SOLVE_PRESET,
         "geometry_units": GEOMETRY_UNITS,
         "linear_solver": "dense_lu",
         "polarizations": list(OUTPUT_POLARIZATIONS),
-        "max_panels": int(MAX_PANELS),
-        "blas_threads_per_worker": int(BLAS_THREADS_PER_WORKER),
+        "max_panels": _MAX_PANELS,
+        "blas_threads_per_worker": blas_threads,
         "mesh_convergence_policy": mesh_policy,
         "accuracy_target": ACCURACY_TARGET,
-        "lu_precision": LU_PRECISION,
-        "solver_method": SOLVER_METHOD,
+        "lu_precision": AUTOMATIC_LU_PRECISION,
+        "solver_method": AUTOMATIC_SOLVER_METHOD,
         "execution_options": current_options(),
         "mesh_certification": bool(MESH_CERTIFICATION),
     }
@@ -546,10 +465,10 @@ def main() -> 'None':
         "run_solve_spec_sha256": manifest_solve_spec_fingerprint(manifest),
         "solver_config_sha256": stable_json_fingerprint(solver_config),
         "geometry_units": GEOMETRY_UNITS,
-        "max_panels": int(MAX_PANELS),
+        "max_panels": _MAX_PANELS,
         "mesh_convergence_policy": mesh_policy,
-        "lu_precision": LU_PRECISION,
-        "solver_method": SOLVER_METHOD,
+        "lu_precision": AUTOMATIC_LU_PRECISION,
+        "solver_method": AUTOMATIC_SOLVER_METHOD,
         "execution_options": current_options(),
         "mesh_certification": bool(MESH_CERTIFICATION),
         "azimuths_deg": azimuths,
@@ -576,10 +495,10 @@ def main() -> 'None':
     )
 
     cores = hpc_scheduler.detect_cores()
-    if int(BLAS_THREADS_PER_WORKER) > cores:
+    if blas_threads > cores:
         raise ValueError("BLAS threads per solve exceed the available CPU allocation ({}).".format(cores))
     memory_gb = hpc_scheduler.detect_memory_gb()
-    budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
+    budget_gb = max(1.0, memory_gb * _MEMORY_HEADROOM)
     worker_cap = max(1, cores - 1) if WORKERS is None else int(WORKERS)
     pool_size = max(1, min(cores, worker_cap, len(ordered)))
     from ghost_backend.runs.batch import apply_batch_choices
@@ -619,7 +538,7 @@ def main() -> 'None':
     print(f"  Units total   : {len(ordered)}  (geometry x frequency)")
     print(f"  Mesh check    : {'base + fine comparison' if MESH_CERTIFICATION else 'base only (no mesh comparison)'}")
     print(f"  Workers       : {pool_size} of {cores} cpus  "
-          f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER}, "
+          f"(BLAS threads/worker: {blas_threads}, "
           f"assembly threads/solve: {thread_label})")
     if heaviest_concurrency < pool_size:
         print(f"  Heaviest units: {heaviest_concurrency} concurrent at "
@@ -679,8 +598,8 @@ def main() -> 'None':
     with Pool(
         processes=pool_size,
         initializer=_pool_initializer,
-        initargs=(int(BLAS_THREADS_PER_WORKER),),
-        maxtasksperchild=int(TASKS_PER_CHILD),
+        initargs=(blas_threads,),
+        maxtasksperchild=_TASKS_PER_CHILD,
     ) as pool:
         dispatcher = hpc_scheduler.MemoryAwareDispatcher(
             pool, budget_gb=budget_gb, max_concurrent=pool_size,
@@ -691,7 +610,7 @@ def main() -> 'None':
             peak_gb = peaks.get(_unit_name(unit), 0.0)
             return (
                 peak_gb,
-                max(int(BLAS_THREADS_PER_WORKER), _unit_assembly_threads(
+                max(blas_threads, _unit_assembly_threads(
                     cores, pool_size, budget_gb, peak_gb
                 )),
             )

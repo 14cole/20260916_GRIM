@@ -1,86 +1,30 @@
-"""Portable 2D and BOR physics setups for GHOST and batch drivers."""
-import json
+"""Run requests, setup checks and output notes for the GHOST solver tab."""
 import math
-import os
 from pathlib import Path
-import tempfile
 
 DEFAULT_QUALITY = {'residual_norm_max': 1e-6, 'condition_est_max': 1e6, 'warnings_max': 10}
+REQUEST_SCHEMA = 'grim.2d-run-request'
 
 
-def validate_setup(value):
-    if isinstance(value, dict) and value.get('schema') == 'grim.bor-run-setup':
-        from ghost_backend.runs.bor_setup import validate_bor_setup
-        return validate_bor_setup(value)
-    if not isinstance(value, dict) or value.get('schema') != 'grim.2d-run-setup' or type(value.get('version')) is not int or value.get('version') not in (1, 2):
-        raise ValueError('Choose a supported GRIM 2D run setup (version 1 or 2).')
-    allowed = {'schema', 'version', 'frequencies_ghz', 'angles_deg', 'units', 'mesh_certification',
-               'accuracy', 'lu_precision', 'scattering', 'observation_angles_deg', 'quality'}
-    if set(value) - {'solver_method', 'execution_options'} != allowed:
-        raise ValueError('Run setup has missing or unsupported fields. No settings were applied.')
-    result = dict(value)
-    if value['version'] == 2 and 'execution_options' not in value:
-        raise ValueError('Version 2 setups require execution settings.')
-    from ghost_backend.execution.options import validate_for_run
-    result['version'] = 2
-    result.setdefault('solver_method', 'direct')
-    if result['solver_method'] not in ('auto', 'direct', 'experimental_cpu'):
-        raise ValueError('Unsupported solver method.')
-    if result['solver_method'] == 'experimental_cpu' and (value['scattering'] != 'monostatic' or value['lu_precision'] != 'double'):
-        raise ValueError('Experimental CPU requires monostatic scattering and double LU precision.')
-    for key in ('frequencies_ghz', 'angles_deg', 'observation_angles_deg'):
-        entries = value[key]
-        if not isinstance(entries, list) or (key != 'observation_angles_deg' and not entries):
-            raise ValueError(f'{key}: supply a nonempty numeric list.')
-        if len(entries) > 100000:
-            raise ValueError(f'{key}: setup exceeds 100,000 samples.')
-        if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in entries):
-            raise ValueError(f'{key}: every sample must be finite and numeric.')
-        if len(entries) != len(set(entries)):
-            raise ValueError(f'{key}: duplicate samples are not supported in a saved setup.')
-        if key == 'frequencies_ghz' and any(x <= 0 for x in entries):
-            raise ValueError('Frequencies must be positive GHz values.')
-        result[key] = list(entries)
-    for key, choices in [('units', ('inches', 'meters')), ('accuracy', ('standard', 'tight')),
-                         ('lu_precision', ('double', 'mixed')), ('scattering', ('monostatic', 'bistatic'))]:
-        if value[key] not in choices:
-            raise ValueError(f'Unsupported {key}: {value[key]!r}.')
-    if type(value['mesh_certification']) is not bool:
-        raise ValueError('mesh_certification must be true or false.')
-    if value['scattering'] == 'bistatic' and not value['observation_angles_deg']:
-        raise ValueError('Bistatic setup requires observation angles.')
-    quality = value['quality']
-    if not isinstance(quality, dict) or set(quality) != set(DEFAULT_QUALITY):
-        raise ValueError('Invalid quality thresholds.')
-    for key, x in quality.items():
-        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0 or (key != 'warnings_max' and x == 0):
-            raise ValueError(f'Invalid quality threshold: {key}.')
-    if int(quality['warnings_max']) != quality['warnings_max']:
-        raise ValueError('Warning threshold must be a whole number.')
-    result['quality'] = dict(quality)
-    result['execution_options'] = validate_for_run(value.get('execution_options', {}),
-        result['solver_method'], value['lu_precision'], value['scattering'])
-    return result
-
-
-def save_setup(path, value):
-    value = validate_setup(value)
-    path = Path(path)
-    if not path.name.endswith('.run.json'):
-        raise ValueError('Save run setups with the .run.json suffix.')
-    fd, temporary = tempfile.mkstemp(prefix='.run-setup-', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump(value, stream, indent=2, allow_nan=False)
-            stream.write('\n')
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-def read_setup(path):
-    return validate_setup(json.loads(Path(path).read_text(encoding='utf-8')))
+def two_d_request(frequencies_ghz, angles_deg, units, mesh_certification, accuracy,
+                  scattering, observation_angles_deg):
+    """The physical choices of a 2D run; execution settings are always automatic."""
+    from ghost_backend.execution.options import automatic_run
+    request = dict(schema=REQUEST_SCHEMA, frequencies_ghz=[float(f) for f in frequencies_ghz],
+                   angles_deg=[float(a) for a in angles_deg], units=units,
+                   mesh_certification=bool(mesh_certification), accuracy=accuracy,
+                   scattering=scattering,
+                   observation_angles_deg=[float(a) for a in (observation_angles_deg or [])])
+    if not request['frequencies_ghz'] or any(not math.isfinite(f) or f <= 0 for f in request['frequencies_ghz']):
+        raise ValueError('Frequencies must be positive GHz values.')
+    if not request['angles_deg'] or any(not math.isfinite(a) for a in request['angles_deg']):
+        raise ValueError('Supply at least one finite incident angle.')
+    if units not in ('inches', 'meters') or accuracy not in ('standard', 'tight'):
+        raise ValueError('Unsupported units or accuracy target.')
+    if scattering == 'bistatic' and not request['observation_angles_deg']:
+        raise ValueError('Bistatic mode requires at least one observation angle.')
+    request.update(automatic_run(scattering))
+    return request
 
 
 def geometry_dimensions(snapshot, units):
@@ -95,53 +39,11 @@ def geometry_dimensions(snapshot, units):
 
 
 class RunSetupMixin:
-    def _build_run_setup_controls(self, form, advanced_form=None):
+    def _build_run_setup_controls(self, form):
         try:
-            from PySide6.QtCore import Qt
-            from PySide6.QtWidgets import QComboBox, QLabel, QWidget, QHBoxLayout, QPushButton
+            from PySide6.QtWidgets import QLabel, QPushButton
         except ImportError:
-            from PySide2.QtCore import Qt
-            from PySide2.QtWidgets import QComboBox, QLabel, QWidget, QHBoxLayout, QPushButton
-        details = advanced_form if advanced_form is not None else form
-        from ghost_backend.ui.execution import ExecutionOptionsWidget
-        self.execution_options_widget = ExecutionOptionsWidget()
-        self.execution_options_widget.changed.connect(self._sync_execution_options)
-        details.addRow(self.execution_options_widget)
-        self.geometry_preset_combo = QComboBox()
-        self.geometry_preset_combo.setPlaceholderText('Custom (Advanced Settings)')
-        self.geometry_preset_combo.setMinimumContentsLength(24)
-        self.geometry_preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.geometry_preset_notice = QLabel()
-        self.geometry_preset_notice.setWordWrap(True)
-        for name, label, description in (
-            ('adaptive', 'Automatic (recommended)',
-             'The solver chooses a compatible backend using estimated runtime and available memory. Accuracy checks remain enabled as configured.'),
-            ('small', 'Small Geometry (No RAM Optimization)',
-             'Dense solve without sweep compression. Use when the geometry fits comfortably in RAM.'),
-            ('large', 'Large Geometry (RAM Optimization)',
-             'Reduces RAM for large geometries and wide sweeps. May take longer for small geometries.'),
-            ('balanced', 'Balanced',
-             'Reuses work across angles with a dense solve. Uses more RAM than Large Geometry.'),
-        ):
-            self.geometry_preset_combo.addItem(label, name)
-            self.geometry_preset_combo.setItemData(self.geometry_preset_combo.count() - 1, description, Qt.ToolTipRole)
-        details.addRow('Performance override', self.geometry_preset_combo)
-        form.insertRow(2, self.geometry_preset_notice)
-        self.geometry_preset_combo.currentIndexChanged.connect(self._apply_geometry_preset)
-        method = self.cmb_solver_method
-        precision = self.cmb_lu_precision
-        method.currentIndexChanged.connect(self._sync_geometry_preset)
-        precision.currentIndexChanged.connect(self._sync_geometry_preset)
-        row = QWidget()
-        buttons = QHBoxLayout(row)
-        buttons.setContentsMargins(0,0,0,0)
-        self.save_run_setup_button = QPushButton('Save run setup\u2026')
-        self.load_run_setup_button = QPushButton('Load run setup\u2026')
-        buttons.addWidget(self.save_run_setup_button)
-        buttons.addWidget(self.load_run_setup_button)
-        self.save_run_setup_button.clicked.connect(self._save_run_setup)
-        self.load_run_setup_button.clicked.connect(self._load_run_setup)
-        details.addRow(row)
+            from PySide2.QtWidgets import QLabel, QPushButton
         self.run_setup_notice = QLabel()
         self.run_setup_notice.setWordWrap(True)
         form.addRow(self.run_setup_notice)
@@ -153,78 +55,6 @@ class RunSetupMixin:
         self.cmb_units.currentTextChanged.connect(self._update_run_dimensions)
         self.edit_geo_path.textChanged.connect(self._update_run_dimensions)
 
-    def _apply_geometry_preset(self, *_):
-        """Apply a complete performance preset while retaining host paths and RAM budgets."""
-        name = self.geometry_preset_combo.currentData()
-        if name is None or self._setup_busy():
-            return
-        solver = self.cmb_solver_kind
-        if solver.currentData() != '2d' or self.cmb_scatter_mode.currentData() != 'monostatic':
-            self._sync_geometry_preset()
-            return
-        from PySide6.QtCore import QSignalBlocker
-        from ghost_backend.execution.options import geometry_preset
-        value = geometry_preset(name)
-        try:
-            current = self.execution_options_widget.value()
-        except ValueError as exc:
-            self._sync_geometry_preset()
-            self.run_setup_notice.setText(str(exc))
-            return
-        for key in ('ram_budget_gib', 'temporary_directory'):
-            value['execution_options'][key] = current[key]
-        method = self.cmb_solver_method
-        precision = self.cmb_lu_precision
-        blockers = [QSignalBlocker(widget) for widget in (method, precision, self.execution_options_widget)]
-        method.setCurrentIndex(method.findData(value['solver_method']))
-        precision.setCurrentIndex(precision.findData(value['lu_precision']))
-        self.execution_options_widget.set_value(value['execution_options'])
-        del blockers
-        self._sync_execution_options()
-
-    def _sync_geometry_preset(self, *_):
-        """Display the preset matching active settings, or a non-selectable custom state."""
-        if not hasattr(self, 'geometry_preset_combo'):
-            return
-        from PySide6.QtCore import QSignalBlocker, Qt
-        from ghost_backend.execution.options import geometry_preset
-        solver = self.cmb_solver_kind
-        available = solver.currentData() == '2d' and self.cmb_scatter_mode.currentData() == 'monostatic'
-        self.geometry_preset_combo.setEnabled(available and not self._setup_busy())
-        try:
-            current = self.execution_options_widget.value()
-        except ValueError:
-            current = None
-        method = self.cmb_solver_method.currentData()
-        precision = self.cmb_lu_precision.currentData()
-        match = -1
-        for index in range(self.geometry_preset_combo.count()):
-            value = geometry_preset(self.geometry_preset_combo.itemData(index))
-            ignored = {'ram_budget_gib', 'temporary_directory'}
-            if current is None:
-                break
-            if self.geometry_preset_combo.itemData(index) == 'adaptive' and current['factorization']=='adaptive' and method=='auto' and precision=='double':
-                match=index
-                break
-            if current['factorization'] == 'dense':
-                ignored.add('compressed_storage_mib')
-            if (value['solver_method'] == method and value['lu_precision'] == precision
-                    and all(current[key] == expected for key, expected in value['execution_options'].items() if key not in ignored)):
-                match = index
-                break
-        blocker = QSignalBlocker(self.geometry_preset_combo)
-        self.geometry_preset_combo.setCurrentIndex(match if available else -1)
-        del blocker
-        self.geometry_preset_combo.setPlaceholderText('Custom (Advanced Settings)' if available else 'Not applicable')
-        if not available:
-            description = 'Geometry presets apply to 2D monostatic solves.'
-        elif match < 0:
-            description = 'Using custom performance settings. Choose a preset to reset them, or edit Advanced Settings.'
-        else:
-            description = self.geometry_preset_combo.itemData(match, Qt.ToolTipRole)
-        self.geometry_preset_notice.setText(description)
-        self.geometry_preset_combo.setToolTip(description)
-
     def _setup_busy(self):
         return self._job_is_active()
 
@@ -233,125 +63,17 @@ class RunSetupMixin:
         is_bor = solver.currentData() == 'bor'
         freq, angles = self._collect_frequency_values(), self._collect_elevation_values()
         if is_bor:
-            return validate_setup(dict(schema='grim.bor-run-setup', version=1,
+            from ghost_backend.runs.bor_setup import validate_bor_setup
+            return validate_bor_setup(dict(schema='grim.bor-run-setup', version=1,
                 frequencies_ghz=freq, aspects_deg=angles, radar_grid=None,
                 units=self.cmb_units.currentText(),
                 mesh_certification=self.chk_mesh_certification.isChecked(),
                 accuracy=self.cmb_accuracy_target.currentData(),
                 cfie_alpha=float(self.edit_cfie_alpha.text()), bor_options=self.bor_options_widget.value()))
-        return validate_setup(dict(schema='grim.2d-run-setup', version=2,
-            execution_options=self.execution_options_widget.value(),
-            frequencies_ghz=freq, angles_deg=angles,
-            units=self.cmb_units.currentText(),
-            mesh_certification=self.chk_mesh_certification.isChecked(),
-            accuracy=self.cmb_accuracy_target.currentData(),
-            lu_precision=self.cmb_lu_precision.currentData(),
-            solver_method=self.cmb_solver_method.currentData(),
-            scattering=self.cmb_scatter_mode.currentData(),
-            observation_angles_deg=[] if self.cmb_scatter_mode.currentData() == 'monostatic' else self._parse_list(self.edit_obs_angles.text(), 'Observation angles'),
-            quality=dict(
-                residual_norm_max=float(self.edit_quality_residual_max.text()),
-                condition_est_max=float(self.edit_quality_condition_max.text()),
-                warnings_max=float(self.edit_quality_warnings_max.text()))))
-
-    def _sync_execution_options(self, *_):
-        if not hasattr(self, 'execution_options_widget'):
-            return
-        method = self.cmb_solver_method
-        precision = self.cmb_lu_precision
-        factor = self.execution_options_widget.factor_combo.currentData()
-        solver = self.cmb_solver_kind
-        if solver.currentData() == '2d' and factor == 'adaptive':
-            method.setCurrentIndex(method.findData('auto'))
-        if solver.currentData() == '2d' and factor == 'compressed':
-            method.setCurrentIndex(method.findData('experimental_cpu'))
-        if factor != 'dense':
-            precision.setCurrentIndex(precision.findData('double'))
-        if hasattr(self, 'btn_advanced_settings'):
-            self._apply_job_state()
-        self._sync_geometry_preset()
-
-    def _apply_saved_run_setup(self, raw):
-        value = validate_setup(raw)
-        if value['schema'] == 'grim.bor-run-setup':
-            return self._apply_saved_bor_setup(value)
-        solver = self.cmb_solver_kind
-        from PySide6.QtCore import QSignalBlocker
-        method = self.cmb_solver_method
-        precision = self.cmb_lu_precision
-        blocked = [solver, method, precision, self.execution_options_widget]
-        blocked.append(self.cmb_scatter_mode)
-        blockers = [QSignalBlocker(widget) for widget in blocked]
-        solver.setCurrentIndex(solver.findData('2d'))
-        def text(values):
-            return ', '.join(format(v, '.17g') for v in values)
-        self.cmb_freq_mode.setCurrentIndex(0)
-        self.cmb_elev_mode.setCurrentIndex(0)
-        self.edit_freq_list.setText(text(value['frequencies_ghz']))
-        self.edit_elev_list.setText(text(value['angles_deg']))
-        self.cmb_units.setCurrentText(value['units'])
-        self.cmb_scatter_mode.setCurrentIndex(self.cmb_scatter_mode.findData(value['scattering']))
-        self.edit_obs_angles.setText(text(value['observation_angles_deg']))
-        for field,key in [(self.edit_quality_residual_max,'residual_norm_max'), (self.edit_quality_condition_max,'condition_est_max'), (self.edit_quality_warnings_max,'warnings_max')]:
-            field.setText(format(value['quality'][key], '.17g'))
-        self.chk_mesh_certification.setChecked(value['mesh_certification'])
-        for combo,key in [(self.cmb_accuracy_target,'accuracy'), (self.cmb_lu_precision,'lu_precision')]:
-            combo.setCurrentIndex(combo.findData(value[key]))
-        method = self.cmb_solver_method
-        method.setCurrentIndex(method.findData(value['solver_method']))
-        self.execution_options_widget.set_value(value['execution_options'])
-        del blockers
-        self._sync_execution_options()
-        self._on_solver_kind_changed()
-        self.run_setup_notice.setText('2D setup loaded. Check geometry, dimensions, and output before running.')
-
-    def _apply_saved_bor_setup(self, value):
-        from PySide6.QtCore import QSignalBlocker
-        solver = self.cmb_solver_kind
-        blockers = [QSignalBlocker(solver)]
-        blockers.append(QSignalBlocker(self.cmb_scatter_mode))
-        self.cmb_scatter_mode.setCurrentIndex(self.cmb_scatter_mode.findData('monostatic'))
-        solver.setCurrentIndex(solver.findData('bor'))
-        text = lambda samples: ', '.join(format(x, '.17g') for x in samples)
-        self.cmb_freq_mode.setCurrentIndex(0)
-        self.cmb_elev_mode.setCurrentIndex(0)
-        self.edit_freq_list.setText(text(value['frequencies_ghz']))
-        self.edit_elev_list.setText(text(value['aspects_deg']))
-        self.cmb_units.setCurrentText(value['units'])
-        self.chk_mesh_certification.setChecked(value['mesh_certification'])
-        accuracy = self.cmb_accuracy_target
-        accuracy.setCurrentIndex(accuracy.findData(value['accuracy']))
-        self.edit_cfie_alpha.setText(format(value['cfie_alpha'], '.17g'))
-        self.bor_options_widget.set_value(value['bor_options'])
-        del blockers
-        self._on_solver_kind_changed()
-        note = ('Radar grid reduced to its unique body aspects. GHOST solves and plots in body coordinates.'
-                if value.get('radar_grid') is not None else
-                'Original angle convention retained.')
-        self.run_setup_notice.setText('BOR setup loaded. ' + note + ' Check geometry and output before running.')
-
-    def _save_run_setup(self):
-        from PySide6.QtWidgets import QFileDialog
-        if self._setup_busy(): return
-        try:
-            value = self._capture_run_setup()
-            path,_ = QFileDialog.getSaveFileName(self, 'Save run setup', 'setup.run.json', 'Run setup (*.run.json)')
-            if path:
-                if not path.endswith('.run.json'): path += '.run.json'
-                save_setup(path,value)
-                self.run_setup_notice.setText(f'Setup saved: {path}')
-        except Exception as exc:
-            self.run_setup_notice.setText(str(exc))
-
-    def _load_run_setup(self):
-        from PySide6.QtWidgets import QFileDialog
-        if self._setup_busy(): return
-        path,_ = QFileDialog.getOpenFileName(self, 'Load run setup', '', 'Run setup (*.run.json)')
-        if path:
-            try:
-                self._apply_saved_run_setup(read_setup(path))
-            except Exception as exc:
-                self.run_setup_notice.setText(str(exc))
+        scattering = self.cmb_scatter_mode.currentData()
+        return two_d_request(freq, angles, self.cmb_units.currentText(),
+            self.chk_mesh_certification.isChecked(), self.cmb_accuracy_target.currentData(), scattering,
+            [] if scattering == 'monostatic' else self._parse_list(self.edit_obs_angles.text(), 'Observation angles'))
 
     def _update_run_dimensions(self, *_):
         try:
@@ -401,9 +123,8 @@ class RunSetupMixin:
         return (f"{result['segment_count']} segments; {result['primitive_count']} primitives. "
                 + geometry_dimensions(snapshot,value['units']) + '\n'
                 + f"{len(value['frequencies_ghz'])} frequencies \u00d7 {len(value['angles_deg'])} incident angles; {count} samples per channel, VV + HH. "
-                + ('Base/fine mesh comparison' if value['mesh_certification'] else 'Survey; no mesh certificate')
-                + f"; {value['accuracy']} target; {value['solver_method']} method; {value['lu_precision']} LU.\n"
-                + 'Execution: ' + value['execution_options']['factorization'] + '; RAM budget ' + str(value['execution_options']['ram_budget_gib'] or 'available memory') + '; compressed payload cap ' + str(value['execution_options']['compressed_storage_mib']) + ' MiB.\n'
+                + ('Base/fine mesh comparison' if value['mesh_certification'] else 'Uncertified single mesh')
+                + f"; {value['accuracy']} target.\n"
                 + selection_note
                 + ('Warnings: ' + '; '.join(warnings) if warnings else 'Geometry and material checks passed.')
                 + '\nSolver quality and convergence are evaluated during the run.')
@@ -455,7 +176,7 @@ class RunSetupMixin:
         self.run_setup_notice.setText('Checking the current geometry and setup\u2026')
         thread=QThread(self)
         is_bor = value['schema'] == 'grim.bor-run-setup'
-        worker=_SolveWorker(snapshot,'',base_dir,value['frequencies_ghz'],value['aspects_deg'] if is_bor else value['angles_deg'],value['units'],value.get('quality', DEFAULT_QUALITY),
+        worker=_SolveWorker(snapshot,'',base_dir,value['frequencies_ghz'],value['aspects_deg'] if is_bor else value['angles_deg'],value['units'],DEFAULT_QUALITY,
                             abort_event=self._abort_event,preflight_setup=value,preflight_only=True,
                             execution_options=value.get('execution_options'), solver_method=value.get('solver_method', 'direct'),
                             lu_precision=value.get('lu_precision', 'double'), solver_kind='bor' if is_bor else '2d',

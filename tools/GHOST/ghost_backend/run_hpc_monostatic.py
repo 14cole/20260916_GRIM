@@ -50,7 +50,9 @@ if not __package__:
     if Path(__file__).resolve().parent.name == "ghost_backend":
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ghost_backend.execution.paths import backend_root as _backend_root
-from ghost_backend.execution.options import current_options, efficient_defaults
+from ghost_backend.execution.options import (
+    AUTOMATIC_LU_PRECISION, AUTOMATIC_SOLVER_METHOD, current_options,
+)
 from ghost_backend.runs.execution import driver_execution, unit_execution
 
 import argparse
@@ -104,14 +106,9 @@ OPN_DIR = "ghost_backend/geometry/geometries/OPN"
 FREQUENCIES_GHZ = [2.0, 4.0, 6.0, 8.0, 10.0]
 AZIMUTHS_DEG    = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
 
-# Solve configuration: one preset shared with the desktop geometry presets.
-# auto: minimize predicted batch completion time using dense/compressed workers.
-# small: reference/dense, no basis reuse; balanced: streaming/dense;
-# large: streaming/compressed. All named presets use double precision.
-SOLVE_PRESET = "auto"             # "auto" | "small" | "balanced" | "large"
-# Optional execution fields, e.g. {"assembly_threads": 2, "angle_batch_size": 128}.
-# Leave empty for preset defaults. See RUN_PROFILES.md for supported overrides.
-ADVANCED_OVERRIDES = {}
+GEOMETRY_UNITS = "inches"         # "inches" | "meters"
+MESH_CERTIFICATION = True        # True: compare base/fine meshes. False: one uncertified mesh.
+ACCURACY_TARGET = "standard"     # "standard" | "tight"
 
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "ghost_backend/results/rcs_runs"
@@ -133,7 +130,8 @@ N_JOBS  = 1
 ARRAY_THROTTLE = None
 
 # ===============================================================================
-# ADVANCED -- fine tuning (SLURM resources, solver knobs, env setup)
+# SLURM allocation and job environment. The backend, mesh, threads and memory
+# admission are chosen automatically for each solve.
 # ===============================================================================
 
 # --- SLURM resources (per array task = one node) ---------------------------
@@ -153,13 +151,6 @@ MAX_WORKERS_PER_NODE = None       # Hard ceiling on concurrent solves per node.
                                   # None = one per allocated core. The memory
                                   # budget below is usually the binding
                                   # constraint, so this rarely needs setting.
-MEMORY_HEADROOM = 0.85            # Fraction of the node's memory allocation the
-                                  # scheduler may reserve for solves. The rest
-                                  # covers the parent process, page cache, and
-                                  # the gap between estimate and reality.
-MEMORY_SAFETY   = 1.35            # Dense: whole-estimate margin. Compressed:
-                                  # sampled operator margin only; inverse and
-                                  # phase workspaces are already accounted for.
 MAX_SOLVE_GB    = None            # Hard ceiling on ONE solve's estimated
                                   # footprint, exported to the job as
                                   # GHOST_MAX_SOLVE_GB. None = derive it from
@@ -181,86 +172,24 @@ SLURM_EXTRA_SBATCH = []  # type: List[str]  # raw extra lines, e.g. "--constrain
 
 JOB_PROLOGUE = []  # type: List[str]
 
-# Solver accuracy; presets retain these choices.
-GEOMETRY_UNITS = "inches"         # "inches" | "meters"
-MAX_PANELS = 50_000
-MESH_CERTIFICATION = True        # compare base/refined meshes before export
-ACCURACY_TARGET = "standard"     # "standard" | "tight"
-
-# Pool worker lifetime. Each worker is replaced after this many units so
-# allocator growth from a big solve cannot accumulate across a long sweep. The
-# solver is imported in the parent, so a forked worker inherits it and a
-# respawn costs a fork rather than a re-import of numpy, SciPy, and the solver.
-TASKS_PER_CHILD = 4
-
-# A claim whose heartbeat has been quiet this long is treated as abandoned and
-# may be taken over. Must comfortably exceed the longest single unit.
-CLAIM_STALE_SECONDS = 3600
-
-# --- Geometry discovery & submission ---------------------------------------
-GEOMETRY_EXTS = (".geo",)
 PYTHON_EXE    = sys.executable           # interpreter used inside the job
 SUBMIT        = True                     # False -> write .slurm files but don't sbatch
 
 # ===============================================================================
 
-from ghost_backend.runs.config import (
-    load_driver_configuration,
-    configuration_source_records,
-    copy_configuration,
-)
-_CONFIG_KIND = '2d'
-# Legacy custom profiles remain supported by --config and old request bundles.
-# For direct edits to these aliases, set SOLVE_PRESET="custom". Named presets
-# use ADVANCED_OVERRIDES for execution settings and MAX_SOLVE_GB for RAM.
-SOLVER_METHOD = "auto"
-LU_PRECISION = "double"
-BLAS_THREADS_PER_WORKER = efficient_defaults()['blas_threads']
-ASSEMBLY_THREADS = efficient_defaults()['assembly_threads']
-EXECUTION_OPTIONS = None
-
-_CONFIG_KEYS = (
-    'SOLVE_PRESET',
-    'ADVANCED_OVERRIDES',
-    'EXECUTION_OPTIONS',
-    'FRD_DIR',
-    'OPN_DIR',
-    'FREQUENCIES_GHZ',
-    'AZIMUTHS_DEG',
-    'OUTPUT_DIR',
-    'N_NODES',
-    'N_JOBS',
-    'ARRAY_THROTTLE',
-    'SLURM_PARTITION',
-    'SLURM_ACCOUNT',
-    'SLURM_QOS',
-    'SLURM_TIME',
-    'CORES_PER_NODE',
-    'MEM_PER_NODE',
-    'MAX_WORKERS_PER_NODE',
-    'MEMORY_HEADROOM',
-    'MEMORY_SAFETY',
-    'MAX_SOLVE_GB',
-    'SLURM_MAIL_TYPE',
-    'SLURM_MAIL_USER',
-    'SLURM_EXTRA_SBATCH',
-    'JOB_PROLOGUE',
-    'GEOMETRY_UNITS',
-    'MAX_PANELS',
-    'MESH_CERTIFICATION',
-    'ACCURACY_TARGET',
-    'LU_PRECISION',
-    'SOLVER_METHOD',
-    'BLAS_THREADS_PER_WORKER',
-    'ASSEMBLY_THREADS',
-    'TASKS_PER_CHILD',
-    'CLAIM_STALE_SECONDS',
-    'GEOMETRY_EXTS',
-    'PYTHON_EXE',
-    'SUBMIT',
-)
-_ACTIVE_CONFIG_PATH = load_driver_configuration(globals(), __file__, _CONFIG_KIND, _CONFIG_KEYS)
-
+# Internal scheduling constants.
+# Fraction of the node's memory allocation the scheduler may reserve for
+# solves; the rest covers the parent process, page cache and estimate error.
+_MEMORY_HEADROOM = 0.85
+# Dense: whole-estimate margin. Compressed: sampled operator margin only.
+_MEMORY_SAFETY = 1.35
+_MAX_PANELS = 100_000
+# Pool workers are replaced after this many units so allocator growth from a
+# big solve cannot accumulate across a long sweep.
+_TASKS_PER_CHILD = 4
+# A claim whose heartbeat has been quiet this long is treated as abandoned.
+_CLAIM_STALE_SECONDS = 3600
+_GEOMETRY_EXTS = (".geo",)
 
 _SBATCH = shutil.which("sbatch") or "sbatch"
 MANIFEST_SCHEMA = "ghost.hpc.2d-run.v2"
@@ -284,7 +213,7 @@ def _solver_source_records():
     """
 
     backend_dir = str(_backend_root())
-    return backend_dir, configuration_source_records(__file__, _ACTIVE_CONFIG_PATH)
+    return backend_dir, {'driver_configured.py': str(Path(__file__).resolve())}
 
 
 def _solver_source_fingerprint():
@@ -381,7 +310,7 @@ def _discover_geometries():
         if not root.is_dir():
             print(f"  [warn] dir not found: {root}", file=sys.stderr)
             continue
-        for ext in GEOMETRY_EXTS:
+        for ext in _GEOMETRY_EXTS:
             for p in sorted(root.rglob(f"*{ext}")):
                 rp = p.resolve()
                 if rp in seen:
@@ -589,12 +518,12 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
             group["frequencies"],
             ["TM", "TE"],
             GEOMETRY_UNITS,
-            MAX_PANELS,
+            _MAX_PANELS,
             fine_factor=fine_factor,
             n_angles=n_angles,
-            safety=float(MEMORY_SAFETY),
+            safety=_MEMORY_SAFETY,
             progress=planning_progress,
-            solver_method=SOLVER_METHOD,
+            solver_method=AUTOMATIC_SOLVER_METHOD,
         )
         for (frequency, polarization), planned in batch.items():
             resource_cache[(geometry, frequency, polarization)] = planned
@@ -655,12 +584,8 @@ def _validate_config():
     # type: () -> Tuple[List[float], List[float]]
     if ACCURACY_TARGET not in ("standard", "tight"):
         sys.exit("ERROR: ACCURACY_TARGET must be 'standard' or 'tight'.")
-    if SOLVER_METHOD not in ("auto", "direct", "experimental_cpu"):
-        sys.exit("ERROR: SOLVER_METHOD must be direct, auto, or experimental_cpu.")
-    if SOLVER_METHOD == "experimental_cpu" and LU_PRECISION != "double":
-        sys.exit("ERROR: experimental_cpu requires LU_PRECISION=double.")
-    if LU_PRECISION not in ("double", "mixed"):
-        sys.exit("ERROR: LU_PRECISION must be 'double' or 'mixed'.")
+    if type(MESH_CERTIFICATION) is not bool:
+        sys.exit("ERROR: MESH_CERTIFICATION must be True or False.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     if not AZIMUTHS_DEG:    sys.exit("ERROR: AZIMUTHS_DEG is empty.")
     frequencies = [float(value) for value in FREQUENCIES_GHZ]
@@ -681,22 +606,10 @@ def _validate_config():
         sys.exit("ERROR: AZIMUTHS_DEG must be finite and unique.")
     if str(GEOMETRY_UNITS).strip().lower() not in {"inches", "meters"}:
         sys.exit("ERROR: GEOMETRY_UNITS must be 'inches' or 'meters'.")
-    if int(MAX_PANELS) < 1 or int(BLAS_THREADS_PER_WORKER) < 1:
-        sys.exit("ERROR: MAX_PANELS and BLAS_THREADS_PER_WORKER must be >= 1.")
     if int(N_NODES) < 1 or int(N_JOBS) < 1:
         sys.exit("ERROR: N_NODES and N_JOBS must be >= 1.")
     if ARRAY_THROTTLE is not None and int(ARRAY_THROTTLE) < 1:
         sys.exit("ERROR: ARRAY_THROTTLE must be None or >= 1.")
-    if not 0.0 < float(MEMORY_HEADROOM) <= 1.0:
-        sys.exit("ERROR: MEMORY_HEADROOM must be in (0, 1].")
-    if float(MEMORY_SAFETY) < 1.0:
-        sys.exit("ERROR: MEMORY_SAFETY must be >= 1.")
-    if int(TASKS_PER_CHILD) < 1:
-        sys.exit("ERROR: TASKS_PER_CHILD must be >= 1.")
-    if ASSEMBLY_THREADS != "auto" and int(ASSEMBLY_THREADS) < 1:
-        sys.exit("ERROR: ASSEMBLY_THREADS must be 'auto' or an integer >= 1.")
-    if int(CLAIM_STALE_SECONDS) < 60:
-        sys.exit("ERROR: CLAIM_STALE_SECONDS must be at least 60.")
     if MAX_SOLVE_GB is not None and float(MAX_SOLVE_GB) <= 0.0:
         sys.exit("ERROR: MAX_SOLVE_GB must be positive or None.")
     return frequencies, azimuths
@@ -778,17 +691,16 @@ def submit():
         "solver_source_inventory": _solver_source_inventory(),
         "runtime_environment_sha256": runtime_environment_fingerprint(),
         "solver_config": {
-            "solve_preset": SOLVE_PRESET,
             "geometry_units":          GEOMETRY_UNITS,
             "linear_solver":           "dense_lu",
             "polarizations":           list(OUTPUT_POLARIZATIONS),
-            "max_panels":              MAX_PANELS,
-            "blas_threads_per_worker": BLAS_THREADS_PER_WORKER,
+            "max_panels":              _MAX_PANELS,
+            "blas_threads_per_worker": int(current_options()["blas_threads"]),
             "cores_per_node":          CORES_PER_NODE,
             "mesh_convergence_policy": mesh_policy,
             "accuracy_target":         ACCURACY_TARGET,
-            "lu_precision":            LU_PRECISION,
-            "solver_method": SOLVER_METHOD,
+            "lu_precision":            AUTOMATIC_LU_PRECISION,
+            "solver_method":           AUTOMATIC_SOLVER_METHOD,
             "execution_options": current_options(),
             "mesh_certification": bool(MESH_CERTIFICATION),
         },
@@ -810,7 +722,6 @@ def submit():
 
     script_path = run_dir / "driver_configured.py"
     shutil.copy2(str(source_driver), str(script_path))
-    copy_configuration(_ACTIVE_CONFIG_PATH, script_path)
     slurm_paths = []  # type: List[Path]
     for j in range(int(N_JOBS)):
         sp = run_dir / f"submit_job{j}.slurm"
@@ -842,7 +753,7 @@ def submit():
             worker_args=(f"--worker {shlex.quote(str(run_dir))} {j} "
                          "${SLURM_ARRAY_TASK_ID}"),
             submission_index=j,
-            blas_threads=int(BLAS_THREADS_PER_WORKER),
+            blas_threads=int(current_options()["blas_threads"]),
             extra_env=(
                 {"GHOST_MAX_SOLVE_GB": f"{float(MAX_SOLVE_GB):g}"}
                 if MAX_SOLVE_GB else {}
@@ -872,7 +783,7 @@ def submit():
           f"{time_str} walltime")
     if peaks:
         print(f"  Unit peak RAM : {min(peaks):.2f}-{max(peaks):.2f} GB "
-              f"estimated (incl. {MEMORY_SAFETY:g}x safety)")
+              f"estimated (incl. {_MEMORY_SAFETY:g}x safety)")
         import ghost_backend.twod.solver as _solver
         ceiling = (
             float(MAX_SOLVE_GB) if MAX_SOLVE_GB
@@ -1009,14 +920,15 @@ def _unit_assembly_threads(cores, pool_size, budget_gb, peak_gb):
     """Thread count/CPU reservation derived from this unit's own footprint."""
 
     return hpc_scheduler.assembly_threads_for_unit(
-        cores, pool_size, budget_gb, peak_gb, configured=ASSEMBLY_THREADS
+        cores, pool_size, budget_gb, peak_gb, configured=current_options()["assembly_threads"]
     )
 
 
 @driver_execution
 def worker(run_dir_str, submission_index, task_index):
     # type: (str, int, int) -> None
-    hpc_scheduler.pin_blas_threads(BLAS_THREADS_PER_WORKER)
+    blas_threads = int(current_options()["blas_threads"])
+    hpc_scheduler.pin_blas_threads(blas_threads)
     hpc_scheduler.install_fingerprint_cache()
 
     run_dir  = Path(run_dir_str).resolve()
@@ -1060,10 +972,10 @@ def worker(run_dir_str, submission_index, task_index):
     planned = len(planned_units)
 
     cores = hpc_scheduler.detect_cores()
-    if int(BLAS_THREADS_PER_WORKER) > cores:
+    if blas_threads > cores:
         raise ValueError("BLAS threads per solve exceed the available CPU allocation ({}).".format(cores))
     memory_gb = hpc_scheduler.detect_memory_gb()
-    budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
+    budget_gb = max(1.0, memory_gb * _MEMORY_HEADROOM)
     worker_cap = cores if MAX_WORKERS_PER_NODE is None else max(1, int(MAX_WORKERS_PER_NODE))
     # Concurrency is sized from this task's OWN share, not from the whole
     # sweep. Sizing it from the total let one task claim every unit before the
@@ -1112,7 +1024,7 @@ def worker(run_dir_str, submission_index, task_index):
     print(f"  Units in run   : {len(units)}   planned for this slot: {planned}"
           f"   (then {len(steal_units)} stealable)")
     print(f"  Cores detected : {cores}   pool size: {pool_size}   "
-          f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER}, "
+          f"(BLAS threads/worker: {blas_threads}, "
           f"assembly threads/solve: {thread_label})")
     if heaviest_concurrency < pool_size:
         print(f"  Heaviest units : {heaviest_concurrency} concurrent at "
@@ -1137,7 +1049,7 @@ def worker(run_dir_str, submission_index, task_index):
     import ghost_backend.io.grim as grim_io
 
     broker = hpc_scheduler.ClaimBroker(
-        run_dir / "claims", stale_seconds=float(CLAIM_STALE_SECONDS)
+        run_dir / "claims", stale_seconds=float(_CLAIM_STALE_SECONDS)
     )
     broker.start_heartbeat()
 
@@ -1208,8 +1120,8 @@ def worker(run_dir_str, submission_index, task_index):
     with Pool(
         processes=pool_size,
         initializer=_pool_initializer,
-        initargs=(int(BLAS_THREADS_PER_WORKER),),
-        maxtasksperchild=int(TASKS_PER_CHILD),
+        initargs=(blas_threads,),
+        maxtasksperchild=_TASKS_PER_CHILD,
     ) as pool:
         dispatcher = hpc_scheduler.MemoryAwareDispatcher(
             pool, budget_gb=budget_gb, max_concurrent=pool_size,
@@ -1220,7 +1132,7 @@ def worker(run_dir_str, submission_index, task_index):
             peak_gb = peaks.get(_unit_name(unit), 0.0)
             return (
                 peak_gb,
-                max(int(BLAS_THREADS_PER_WORKER), _unit_assembly_threads(
+                max(blas_threads, _unit_assembly_threads(
                     cores, pool_size, budget_gb, peak_gb
                 )),
             )
@@ -1288,7 +1200,6 @@ def worker(run_dir_str, submission_index, task_index):
 def main():
     # type: () -> None
     ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("--config", help="Validated JSON driver configuration")
     ap.add_argument(
         "--worker", nargs=3,
         metavar=("RUN_DIR", "SUBMISSION_INDEX", "TASK_INDEX"),

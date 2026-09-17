@@ -19,7 +19,6 @@ sys.path.insert(0, str(BACKEND))
 sys.path.insert(0, str(BACKEND.parent))
 
 BOR_DRIVER = BACKEND / "run_hpc_bor_monostatic.py"
-TWOD_DRIVER = BACKEND / "run_hpc_monostatic.py"
 
 _UNIT_RE = re.compile(r"^(?P<pol>[A-Z]{2})_(?P<freq>[0-9.]+)GHz_(?P<stem>.+)\.grim$")
 _DUAL_UNIT_RE = re.compile(r"^(?P<freq>[0-9.]+)GHz_(?P<stem>.+)\.grim$")

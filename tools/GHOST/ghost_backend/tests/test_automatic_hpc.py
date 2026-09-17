@@ -5,8 +5,9 @@ import numpy as np
 import pytest
 
 BACKEND=Path(__file__).resolve().parents[1]
-sys.path[:0]=[str(BACKEND.parent)]
-from ghost_backend.hpc.common import configure_driver,latest_run_dir,run_status
+sys.path[:0]=[str(BACKEND.parent),str(BACKEND/'tests')]
+from ghost_backend.hpc.common import latest_run_dir,run_status
+from general_fixtures import configured_2d_driver
 
 
 @pytest.mark.parametrize('density,legacy_runtime_api', [(24, False), (24, True),
@@ -18,11 +19,11 @@ def test_default_automatic_request_reaches_fresh_headless_worker(tmp_path, densi
         f'Title: polygon auto test\nSegment: rectangle 2\nproperties: 2 {density} 0 0 0\n'
         '-.02 -.01 -.02 .01\n-.02 .01 .02 .01\n.02 .01 .02 -.01\n.02 -.01 -.02 -.01\n'
         'IBCS_Resistances:\nDielectrics:\n')
-    settings=dict(SOLVE_PRESET='auto',ADVANCED_OVERRIDES=dict(assembly_threads=1,blas_threads=1),
+    settings=dict(
         FREQUENCIES_GHZ=[1.,2.],AZIMUTHS_DEG=[0.,45.,90.],GEOMETRY_UNITS='meters',
         N_NODES=1,N_JOBS=1,MAX_WORKERS_PER_NODE=1,MESH_CERTIFICATION=True,
         OUTPUT_DIR=str(tmp_path/'runs'),SUBMIT=False,FRD_DIR=str(geometry),OPN_DIR=str(empty))
-    driver=configure_driver(BACKEND/'run_hpc_monostatic.py',tmp_path/'driver.py',settings)
+    driver=configured_2d_driver(BACKEND/'run_hpc_monostatic.py',tmp_path/'driver.py',settings)
     (tmp_path/'sitecustomize.py').write_text(
         'import sys\nclass NoGui:\n'
         '    def find_spec(self,fullname,path=None,target=None):\n'

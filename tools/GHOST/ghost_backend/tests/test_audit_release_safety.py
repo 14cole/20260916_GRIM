@@ -34,9 +34,9 @@ class AuditReleaseSafetyTests(unittest.TestCase):
         for name, settings in (
             ('run_local_bor', {'CFIE_ALPHA': 0}),
             ('run_local_bor', {'CFIE_ALPHA': 1}),
-            ('run_local_monostatic', {'MEMORY_SAFETY': .5}),
-            ('run_hpc_monostatic', {'CLAIM_STALE_SECONDS': 1}),
-            ('run_hpc_monostatic', {'FREQUENCIES_GHZ': [1.0001, 1.0002]}),
+            ('run_local_bor', {'MEMORY_HEADROOM': 1.5}),
+            ('run_hpc_bor_monostatic', {'CLAIM_STALE_SECONDS': 1}),
+            ('run_hpc_bor_monostatic', {'FREQUENCIES_GHZ': [1.0001, 1.0002]}),
         ):
             module = importlib.import_module(name)
             with self.subTest(settings=settings), tempfile.TemporaryDirectory() as directory:

@@ -92,7 +92,7 @@ def validate_options(value):
 
 
 def efficient_defaults():
-    """Return the large-sweep preset, bounded by the host's CPU count."""
+    """Return the automatic run profile, bounded by the host's CPU count."""
     values = dict(EFFICIENT_DEFAULTS)
     cores = max(1, os.cpu_count() or 1)
     for key in ('assembly_threads', 'blas_threads'):
@@ -100,25 +100,34 @@ def efficient_defaults():
     return values
 
 
-def geometry_preset(name):
-    """Return 2D monostatic performance settings without changing mesh accuracy."""
+# Every 2D GUI and batch run uses the automatic profile: the backend, mesh and
+# polynomial degree are chosen per solve, and double-precision LU is fixed.
+AUTOMATIC_SOLVER_METHOD = 'auto'
+AUTOMATIC_LU_PRECISION = 'double'
+
+
+def automatic_options(ram_budget_gib=None):
+    """The single 2D run profile, optionally bounded by a per-solve RAM budget."""
     values = efficient_defaults()
-    if name != 'adaptive': values['mesh_strategy'] = 'global'
-    if name == 'small':
-        values.update(factorization='dense', rhs_compression='off')
-        method = 'direct'
-    elif name == 'balanced':
-        values.update(factorization='dense')
-        method = 'experimental_cpu'
-    elif name == 'adaptive':
-        values.update(factorization='adaptive')
-        method = 'auto'
-    elif name == 'large':
-        values.update(factorization='compressed',compressed_storage_mib=8192)
-        method = 'experimental_cpu'
-    else:
-        raise ValueError('Choose small, balanced, large, or adaptive geometry settings.')
-    return dict(solver_method=method, lu_precision='double', execution_options=values)
+    if ram_budget_gib is not None:
+        values['ram_budget_gib'] = float(ram_budget_gib)
+    return validate_options(values)
+
+
+def automatic_run(scattering='monostatic', ram_budget_gib=None):
+    """Solver method, LU precision and execution settings for a 2D run.
+
+    Adaptive meshing and backend selection are monostatic capabilities, so a
+    bistatic run uses dense factorization on the reference mesh.
+    """
+    options = automatic_options(ram_budget_gib)
+    if scattering == 'monostatic':
+        return dict(solver_method=AUTOMATIC_SOLVER_METHOD, lu_precision=AUTOMATIC_LU_PRECISION,
+                    execution_options=options)
+    if scattering != 'bistatic':
+        raise ValueError('Scattering must be monostatic or bistatic.')
+    options = validate_options(dict(options, factorization='dense', mesh_strategy='global'))
+    return dict(solver_method='direct', lu_precision=AUTOMATIC_LU_PRECISION, execution_options=options)
 
 
 def from_environment(defaults=None):

@@ -4,6 +4,25 @@ import numpy as np
 CASES=('rectangle','reentrant','acute','gap','dielectric','mixed','sheet')
 
 
+def configured_2d_driver(source, out_path, settings):
+    """Copy a 2-D driver with top-level CONFIG assignments replaced.
+
+    2-D drivers read no JSON configuration; users edit the CONFIG block, so
+    tests do the same to a private copy.
+    """
+    import re
+    from pathlib import Path
+    text = Path(source).read_text(encoding='utf-8')
+    for name, value in settings.items():
+        pattern = re.compile(r'^' + re.escape(name) + r'\s*=.*$', re.MULTILINE)
+        if len(pattern.findall(text)) != 1:
+            raise ValueError('unknown CONFIG name: ' + name)
+        text = pattern.sub(lambda _match: '{} = {!r}'.format(name, value), text)
+    out_path = Path(out_path)
+    out_path.write_text(text, encoding='utf-8')
+    return out_path
+
+
 def segment(name,vertices,count,kind=2,ibc=0,pos=0,closed=True):
     v=np.asarray(vertices,float)
     if closed:

@@ -822,13 +822,13 @@ Use GHOST's `run_hpc_monostatic.py` for 2D sweeps and
 `run_hpc_bor_monostatic.py` for BoR sweeps. Both live under
 `tools/GHOST/ghost_backend/`. Their local counterparts are
 `run_local_monostatic.py` and `run_local_bor.py`. Configure geometry inputs,
-frequency/angle grids, numerical settings, and resources in the driver's
-CONFIG block or validated JSON configuration. A matching saved GHOST
-`.run.json` setup can be embedded in that configuration as `run_setup`.
+frequency/angle grids and resources in the driver's CONFIG block; 2D solver
+settings are automatic. BoR drivers also accept a validated JSON
+configuration.
 
 The [HPC guide](../../tools/GHOST/HPC.md) covers submission, scheduling,
-resuming interrupted runs, and the bundle CLI for packaging portable inputs
-on Windows and staging them on Linux. Use cluster tools to monitor and manage
+resuming interrupted runs, and the bundle CLI for packaging portable BoR
+inputs on Windows and staging them on Linux. Use cluster tools to monitor and manage
 jobs. Transfer completed `.grim` files locally, then open or drop them into
 GRIM to inspect the results.
 

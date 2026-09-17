@@ -712,7 +712,7 @@ class _BoundaryDensityWorker(QObject):
         self.finished.emit(self.run_id, result)
 
 
-from ghost_backend.runs.setup import RunSetupMixin
+from ghost_backend.runs.setup import DEFAULT_QUALITY, RunSetupMixin
 
 
 class SolverTab(RunSetupMixin, QWidget):
@@ -756,7 +756,7 @@ class SolverTab(RunSetupMixin, QWidget):
 
         self._update_mode_enables()
         self._sync_export_state()
-        self._sync_execution_options()
+        self._on_solver_kind_changed()
         dirty_signal = getattr(self.geometry_tab, "dirty_changed", None)
         if dirty_signal is not None:
             dirty_signal.connect(self._on_geometry_dirty_changed)
@@ -937,55 +937,35 @@ class SolverTab(RunSetupMixin, QWidget):
         self.cmb_units.addItems(["inches", "meters"])
         self.cmb_units.setCurrentText("inches")
 
-        self.lbl_solve_method = QLabel("Linear / Galerkin")
         self.chk_mesh_certification = QCheckBox(
-            "Compare base/fine meshes (recommended)"
+            "Certify mesh convergence (compare base/fine meshes)"
         )
         self.chk_mesh_certification.setToolTip(
-            "When disabled, run one base mesh and mark the result as survey "
-            "data with mesh_convergence_certified=false."
+            "When disabled, run one uncertified mesh and mark the result "
+            "mesh_convergence_certified=false."
         )
         self.chk_mesh_certification.setChecked(True)
-        self.edit_quality_residual_max = QLineEdit("1e-6")
-        self.edit_quality_condition_max = QLineEdit("1e6")
-        self.edit_quality_warnings_max = QLineEdit("10")
-        quality_threshold_row = QWidget()
-        quality_threshold_layout = QHBoxLayout(quality_threshold_row)
-        quality_threshold_layout.setContentsMargins(0, 0, 0, 0)
-        quality_threshold_layout.addWidget(QLabel("residual<="))
-        quality_threshold_layout.addWidget(self.edit_quality_residual_max)
-        quality_threshold_layout.addWidget(QLabel("cond<="))
-        quality_threshold_layout.addWidget(self.edit_quality_condition_max)
-        quality_threshold_layout.addWidget(QLabel("warns<="))
-        quality_threshold_layout.addWidget(self.edit_quality_warnings_max)
 
-        self.btn_advanced_settings = QToolButton()
-        self.btn_advanced_settings.setText("Advanced Settings")
-        self.btn_advanced_settings.setCheckable(True)
-        self.btn_advanced_settings.setChecked(False)
-        self.btn_advanced_settings.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.btn_advanced_settings.setArrowType(Qt.RightArrow)
+        self.btn_tools = QToolButton()
+        self.btn_tools.setText("Tools")
+        self.btn_tools.setCheckable(True)
+        self.btn_tools.setChecked(False)
+        self.btn_tools.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_tools.setArrowType(Qt.RightArrow)
 
-        self.advanced_settings_widget = QWidget()
-        advanced_form = QFormLayout(self.advanced_settings_widget)
-        advanced_form.setContentsMargins(0, 0, 0, 0)
+        self.tools_widget = QWidget()
+        tools_form = QFormLayout(self.tools_widget)
+        tools_form.setContentsMargins(0, 0, 0, 0)
+        self.tools_widget.setVisible(False)
 
+        self.lbl_cfie_alpha = QLabel("BoR CFIE alpha")
         self.edit_cfie_alpha = QLineEdit("0.0")
         self.edit_cfie_alpha.setEnabled(False)
         self.edit_cfie_alpha.setToolTip(
             "BoR closed-PEC CFIE coupling, strictly between 0 and 1 "
             "(0.5 recommended). Use the explicit solver API when pure EFIE "
-            "is intended. The 2-D solver has no CFIE control."
+            "is intended."
         )
-
-        advanced_form.addRow("CFIE alpha", self.edit_cfie_alpha)
-        advanced_form.addRow("Mesh Certification", self.chk_mesh_certification)
-        self.chk_frequency_checkpoints = QCheckBox('Keep completed frequencies and resume matching runs')
-        self.chk_frequency_checkpoints.setChecked(True)
-        self.chk_frequency_checkpoints.setToolTip('Save completed 2D monostatic frequency results to disk and reuse matching results after restart. An interrupted frequency starts over; matrices and factors are not saved. Changed inputs, material files, settings or solver source require recomputation.')
-        advanced_form.addRow('Frequency checkpoints', self.chk_frequency_checkpoints)
-        advanced_form.addRow("Quality Thresholds", quality_threshold_row)
-        self.advanced_settings_widget.setVisible(False)
 
         self.cmb_freq_mode = QComboBox()
         self.cmb_freq_mode.addItems(["Discrete List", "Start / Stop / Step"])
@@ -1045,36 +1025,20 @@ class SolverTab(RunSetupMixin, QWidget):
         options_form.addRow("Solver units", self.cmb_units)
         self.lbl_run_dimensions = QLabel('Check geometry to display physical dimensions.')
         self.lbl_run_dimensions.setWordWrap(True)
-        advanced_form.addRow("Output Channels", QLabel("VV and HH (co-solved)"))
-        advanced_form.addRow("Discretization", self.lbl_solve_method)
         self.cmb_accuracy_target = QComboBox()
         self.cmb_accuracy_target.addItem("Standard", "standard")
         self.cmb_accuracy_target.addItem("Tight (1% maximum complex change)", "tight")
         self.cmb_accuracy_target.setToolTip(
             "Sets the base/fine mesh comparison tolerances for both channels. "
-            "Enable Mesh Certification to run the comparison. These are "
-            "numerical tolerances, not a guarantee about a reduced material model."
+            "These are numerical tolerances, not a guarantee about a reduced "
+            "material model."
         )
-        advanced_form.addRow("Accuracy target", self.cmb_accuracy_target)
-        self.cmb_lu_precision = QComboBox()
-        self.cmb_lu_precision.addItem("Double precision (reference)", "double")
-        self.cmb_lu_precision.addItem("Mixed precision + refinement (experimental)", "mixed")
-        self.cmb_lu_precision.setToolTip("2D CPU only. Factors in single precision and checks double-precision residuals. Falls back to double LU if refinement stalls. Operator assembly still uses quadratic memory.")
-        advanced_form.addRow("2D LU precision", self.cmb_lu_precision)
-        self.cmb_solver_method = QComboBox()
-        self.cmb_solver_method.addItem("Automatic (recommended)", "auto")
-        self.cmb_solver_method.addItem("Reference kernels", "direct")
-        self.cmb_solver_method.addItem("CPU streaming (experimental)", "experimental_cpu")
-        self.cmb_solver_method.setToolTip("Automatic selects the kernel and backend for the geometry, materials, sweep and available resources. Manual kernel choices are advanced overrides.")
-        self.cmb_solver_method.currentIndexChanged.connect(self._apply_job_state)
-        advanced_form.addRow("2D kernel evaluation", self.cmb_solver_method)
         from ghost_backend.ui.bor_options import BorOptionsWidget
         self.bor_options_widget = BorOptionsWidget()
         self.bor_options_widget.setVisible(False)
-        advanced_form.addRow(self.bor_options_widget)
         self.btn_solver_report = QPushButton("Accuracy and performance report...")
         self.btn_solver_report.clicked.connect(self._show_solver_report)
-        advanced_form.addRow(self.btn_solver_report)
+        tools_form.addRow(self.btn_solver_report)
         options_form.addRow("Frequency Mode", self.cmb_freq_mode)
         self.lbl_freq_list = QLabel("Frequencies (GHz)")
         self.lbl_freq_sweep = QLabel("Frequency Sweep (GHz)")
@@ -1088,8 +1052,12 @@ class SolverTab(RunSetupMixin, QWidget):
         options_form.addRow(self.lbl_angle_sweep, elev_sweep_row)
         options_form.addRow("Scattering Mode", self.cmb_scatter_mode)
         options_form.addRow(self.lbl_obs_angles, self.edit_obs_angles)
+        options_form.addRow(self.chk_mesh_certification)
+        options_form.addRow("Accuracy target", self.cmb_accuracy_target)
+        options_form.addRow(self.lbl_cfie_alpha, self.edit_cfie_alpha)
+        options_form.addRow(self.bor_options_widget)
         options_form.addRow(self.lbl_run_dimensions)
-        self._build_run_setup_controls(options_form, advanced_form=advanced_form)
+        self._build_run_setup_controls(options_form)
         layout.addWidget(options_group)
 
         output_group = QGroupBox("Output")
@@ -1107,8 +1075,8 @@ class SolverTab(RunSetupMixin, QWidget):
         output_grid.addWidget(self.chk_export_after_solve, 1, 0, 1, 3)
         output_grid.addWidget(self.run_output_notice, 2, 0, 1, 3)
         layout.addWidget(output_group)
-        layout.addWidget(self.btn_advanced_settings)
-        layout.addWidget(self.advanced_settings_widget)
+        layout.addWidget(self.btn_tools)
+        layout.addWidget(self.tools_widget)
         layout.addStretch(1)
 
         btn_row = QHBoxLayout()
@@ -1125,7 +1093,7 @@ class SolverTab(RunSetupMixin, QWidget):
         btn_row.addWidget(self.btn_run)
         btn_row.addWidget(self.btn_cancel)
         btn_row.addWidget(self.btn_export)
-        advanced_form.addRow(self.btn_currents)
+        tools_form.addRow(self.btn_currents)
         outer.addLayout(btn_row)
 
         self.progress = QProgressBar()
@@ -1144,7 +1112,7 @@ class SolverTab(RunSetupMixin, QWidget):
         self.btn_cancel.clicked.connect(self._cancel_solver)
         self.btn_export.clicked.connect(self._export_last_result)
         self.btn_currents.clicked.connect(self._compute_currents)
-        self.btn_advanced_settings.toggled.connect(self._toggle_advanced_settings)
+        self.btn_tools.toggled.connect(self._toggle_tools)
         self.cmb_freq_mode.currentIndexChanged.connect(self._update_mode_enables)
         self.cmb_elev_mode.currentIndexChanged.connect(self._update_mode_enables)
 
@@ -1267,9 +1235,9 @@ class SolverTab(RunSetupMixin, QWidget):
         )
         return answer == buttons.Yes
 
-    def _toggle_advanced_settings(self, checked: 'bool'):
-        self.advanced_settings_widget.setVisible(bool(checked))
-        self.btn_advanced_settings.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+    def _toggle_tools(self, checked: 'bool'):
+        self.tools_widget.setVisible(bool(checked))
+        self.btn_tools.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
 
     def _show_solver_report(self):
         if self.last_result is None:
@@ -1450,10 +1418,8 @@ class SolverTab(RunSetupMixin, QWidget):
         is_bistatic = not is_bor and self.cmb_scatter_mode.currentData() == 'bistatic'
         self.lbl_obs_angles.setVisible(is_bistatic)
         self.edit_obs_angles.setVisible(is_bistatic)
-        enable_2d_quality_thresholds = not busy and not is_bor
         self.btn_run.setEnabled(not busy)
-        for control in (self.save_run_setup_button, self.load_run_setup_button, self.run_preflight_button):
-            control.setEnabled(not busy)
+        self.run_preflight_button.setEnabled(not busy)
         self._sync_export_state()
         self.btn_currents.setEnabled(not busy and not is_bor)
         self.btn_browse_geo.setEnabled(not busy)
@@ -1471,37 +1437,9 @@ class SolverTab(RunSetupMixin, QWidget):
         self._update_mode_enables()
         self.chk_export_after_solve.setEnabled(not busy)
         self.chk_mesh_certification.setEnabled(not busy)
-        self.chk_frequency_checkpoints.setEnabled(not busy and self.cmb_solver_kind.currentData() == '2d' and self.cmb_scatter_mode.currentData() == 'monostatic')
         self.cmb_accuracy_target.setEnabled(not busy)
-        method_available = not is_bor and self.cmb_scatter_mode.currentData() == "monostatic"
-        if not method_available:
-            self.cmb_solver_method.setCurrentIndex(self.cmb_solver_method.findData('direct'))
-        if method_available and self.execution_options_widget.factor_combo.currentData() == 'adaptive':
-            self.cmb_solver_method.setCurrentIndex(self.cmb_solver_method.findData('auto'))
-        if method_available and self.execution_options_widget.factor_combo.currentData() == 'compressed':
-            self.cmb_solver_method.setCurrentIndex(self.cmb_solver_method.findData('experimental_cpu'))
-        if self.execution_options_widget.factor_combo.currentData() != 'dense':
-            self.cmb_lu_precision.setCurrentIndex(self.cmb_lu_precision.findData('double'))
-        experimental = self.cmb_solver_method.currentData() == "experimental_cpu"
-        if experimental:
-            self.cmb_lu_precision.setCurrentIndex(self.cmb_lu_precision.findData("double"))
-        factor_widget = self.execution_options_widget.factor_combo
-        if not is_bor and not method_available and factor_widget.currentData() != 'dense':
-            factor_widget.setCurrentIndex(factor_widget.findData('dense'))
-        factor = factor_widget.currentData()
-        self.execution_options_widget.setEnabled(not busy and not is_bor)
         self.bor_options_widget.setEnabled(not busy and is_bor)
-        factor_widget.setEnabled(not busy and method_available)
-        self.cmb_solver_method.setEnabled(not busy and method_available and factor not in ('compressed', 'adaptive'))
-        self.execution_options_widget.mesh_combo.setEnabled(not busy and method_available)
-        if not is_bor and not method_available:
-            combo = self.execution_options_widget.mesh_combo
-            combo.setCurrentIndex(combo.findData('global'))
-        self.cmb_lu_precision.setEnabled(not busy and not experimental and factor == 'dense')
-        self.btn_advanced_settings.setEnabled(not busy)
-        self.edit_quality_residual_max.setEnabled(enable_2d_quality_thresholds)
-        self.edit_quality_condition_max.setEnabled(enable_2d_quality_thresholds)
-        self.edit_quality_warnings_max.setEnabled(enable_2d_quality_thresholds)
+        self.btn_tools.setEnabled(not busy)
         self.btn_run.setText("Solving..." if self._is_solving else "Run Solver")
         self.btn_currents.setText(
             "Computing..."
@@ -1516,7 +1454,6 @@ class SolverTab(RunSetupMixin, QWidget):
         self.btn_cancel.setEnabled(
             active_abort is not None and not active_abort.is_set()
         )
-        self._sync_geometry_preset()
 
     def _set_solving_state(self, solving: 'bool') -> 'None':
         self._is_solving = bool(solving)
@@ -1530,12 +1467,14 @@ class SolverTab(RunSetupMixin, QWidget):
         is_bistatic = (self.cmb_scatter_mode.currentData() == "bistatic")
         self.edit_obs_angles.setVisible(is_bistatic)
         self.lbl_obs_angles.setVisible(is_bistatic)
-        if hasattr(self, "cmb_solver_method"):
+        if hasattr(self, "btn_tools"):
             self._apply_job_state()
 
     def _on_solver_kind_changed(self, _index: 'int' = 0) -> 'None':
         is_bor = (self.cmb_solver_kind.currentData() == "bor")
         self.bor_options_widget.setVisible(is_bor)
+        self.lbl_cfie_alpha.setVisible(is_bor)
+        self.edit_cfie_alpha.setVisible(is_bor)
         if is_bor:
 
             self.cmb_scatter_mode.setCurrentIndex(0)
@@ -1549,8 +1488,6 @@ class SolverTab(RunSetupMixin, QWidget):
 
 
             self.edit_cfie_alpha.setText("0.0")
-        self.lbl_solve_method.setText(
-            "BoR-MoM (azimuthal modes)" if is_bor else "Linear / Galerkin")
         self._apply_job_state()
 
     def _compute_currents(self) -> 'None':
@@ -1910,30 +1847,7 @@ class SolverTab(RunSetupMixin, QWidget):
             units = self.cmb_units.currentText()
             mesh_certification = bool(self.chk_mesh_certification.isChecked())
             solver_kind = str(self.cmb_solver_kind.currentData() or "2d")
-            quality_thresholds: 'Dict[str, float | int]' = {}
-            if solver_kind == "2d":
-                quality_residual_max = float(
-                    self.edit_quality_residual_max.text().strip()
-                )
-                quality_condition_max = float(
-                    self.edit_quality_condition_max.text().strip()
-                )
-                quality_warnings_max = int(float(
-                    self.edit_quality_warnings_max.text().strip()
-                ))
-                if quality_residual_max <= 0.0:
-                    raise ValueError("Quality residual threshold must be > 0.")
-                if quality_condition_max <= 0.0:
-                    raise ValueError("Quality condition threshold must be > 0.")
-                if quality_warnings_max < 0:
-                    raise ValueError("Quality warning threshold must be >= 0.")
-                quality_thresholds = {
-                    "residual_norm_max": quality_residual_max,
-                    "condition_est_max": quality_condition_max,
-                    "warnings_max": quality_warnings_max,
-                }
-
-
+            quality_thresholds = dict(DEFAULT_QUALITY) if solver_kind == "2d" else {}
             cfie_text = self.edit_cfie_alpha.text().strip()
             cfie_alpha = (
                 float(cfie_text) if solver_kind == "bor" and cfie_text
@@ -1993,13 +1907,14 @@ class SolverTab(RunSetupMixin, QWidget):
             observation_angles=obs_angles_list,
             solver_kind=solver_kind,
             accuracy_target=str(self.cmb_accuracy_target.currentData()),
-            lu_precision=str(self.cmb_lu_precision.currentData()),
-            solver_method=str(self.cmb_solver_method.currentData()),
-            execution_options=self.execution_options_widget.value(),
+            lu_precision=preflight_setup.get("lu_precision", "double"),
+            solver_method=preflight_setup.get("solver_method", "direct"),
+            execution_options=preflight_setup.get("execution_options"),
             preflight_setup=preflight_setup,
             bor_options=self.bor_options_widget.value(),
+            # Completed 2D monostatic frequencies are always kept for resume.
             checkpoint_directory=(str(Path(QStandardPaths.writableLocation(QStandardPaths.CacheLocation)) / 'ghost-frequency-checkpoints')
-                if self.chk_frequency_checkpoints.isChecked() and solver_kind == '2d' and scatter_mode == 'monostatic' else None),
+                if solver_kind == '2d' and scatter_mode == 'monostatic' else None),
         )
         worker.moveToThread(thread)
 

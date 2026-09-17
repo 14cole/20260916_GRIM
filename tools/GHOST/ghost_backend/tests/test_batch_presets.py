@@ -1,4 +1,4 @@
-"""Batch presets, fast planning, and throughput choices preserve solver contracts."""
+"""Automatic batch settings, fast planning, and throughput choices preserve solver contracts."""
 import json
 import math
 from pathlib import Path
@@ -11,8 +11,6 @@ from unittest import mock
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND.parent))
 from ghost_backend.execution.options import execution_scope, validate_options, current_options
-from ghost_backend.runs.config import configuration_payload, driver_contract
-from ghost_backend.runs.presets import resolve_preset
 from ghost_backend.runs.batch import select_batch_backends, combine_channels
 from ghost_backend.hpc import scheduler
 
@@ -54,42 +52,28 @@ class BatchPresetTests(unittest.TestCase):
                 self.assertTrue(all(c['selected'] == 'dense' for c in choices.values()))
                 self.assertEqual(summary['selected_cost'], 10. * (count + 1))
 
-    def test_presets_resolve_in_both_drivers_and_survive_json_roundtrip(self):
+    def test_both_drivers_use_the_automatic_profile_without_json_configuration(self):
+        import ast
+        from ghost_backend.runs.execution import driver_options
         for driver in ('run_hpc_monostatic.py', 'run_local_monostatic.py'):
-            kind, keys = driver_contract(BACKEND / driver)
-            for name, factor, method in [('auto', 'adaptive', 'auto'),
-                    ('small', 'dense', 'direct'), ('balanced', 'dense', 'experimental_cpu'),
-                    ('large', 'compressed', 'experimental_cpu')]:
-                raw = dict(SOLVE_PRESET=name, ADVANCED_OVERRIDES={'assembly_threads': 2},
-                           MAX_SOLVE_GB=24, MESH_CERTIFICATION=True, ACCURACY_TARGET='tight')
-                payload = configuration_payload(kind, raw, keys)
-                settings = payload['settings']
-                self.assertEqual(settings['EXECUTION_OPTIONS']['factorization'], factor)
-                self.assertEqual(settings['SOLVER_METHOD'], method)
-                self.assertEqual(settings['EXECUTION_OPTIONS']['ram_budget_gib'], 24)
-                self.assertEqual(settings['ASSEMBLY_THREADS'], 2)
-                self.assertTrue(settings['MESH_CERTIFICATION'])
-                self.assertEqual(settings['ACCURACY_TARGET'], 'tight')
-                self.assertEqual(configuration_payload(kind, json.loads(json.dumps(settings)), keys), payload)
+            with self.subTest(driver=driver):
+                tree = ast.parse((BACKEND / driver).read_text(encoding='utf-8'))
+                names = {node.targets[0].id for node in tree.body
+                         if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)}
+                self.assertFalse(names & {'_CONFIG_KEYS', 'SOLVE_PRESET', 'ADVANCED_OVERRIDES',
+                                          'EXECUTION_OPTIONS', 'SOLVER_METHOD', 'LU_PRECISION',
+                                          'BLAS_THREADS_PER_WORKER', 'ASSEMBLY_THREADS'})
+                self.assertTrue({'FREQUENCIES_GHZ', 'AZIMUTHS_DEG', 'GEOMETRY_UNITS', 'MESH_CERTIFICATION',
+                                 'ACCURACY_TARGET', 'MAX_SOLVE_GB'} <= names)
+        profile = driver_options(dict(MAX_SOLVE_GB=24))
+        self.assertEqual((profile['factorization'], profile['mesh_strategy'], profile['ram_budget_gib']),
+                         ('adaptive', 'adaptive', 24.))
+        self.assertIsNone(driver_options(dict(MAX_SOLVE_GB=None))['ram_budget_gib'])
 
-    def test_legacy_recipes_remain_explicit_and_conflicts_are_rejected(self):
-        kind, keys = driver_contract(BACKEND / 'run_hpc_monostatic.py')
-        legacy = configuration_payload(kind, dict(LU_PRECISION='mixed'), keys)['settings']
-        self.assertEqual(legacy['SOLVE_PRESET'], 'custom')
-        self.assertEqual(legacy['SOLVER_METHOD'], 'direct')
-        for raw in (dict(SOLVE_PRESET='typo'), dict(SOLVE_PRESET='small', LU_PRECISION='mixed'),
-                    dict(SOLVE_PRESET='auto', ADVANCED_OVERRIDES={'typo': 1}),
-                    dict(SOLVE_PRESET='auto', MAX_SOLVE_GB=4, ADVANCED_OVERRIDES={'ram_budget_gib': 8})):
-            with self.subTest(raw=raw), self.assertRaises(ValueError):
-                configuration_payload(kind, raw, keys)
-
-    def test_portable_request_preserves_presets(self):
-        from ghost_backend.hpc.bundle import _validate_settings
-        settings = _validate_settings('2d', dict(SOLVE_PRESET='auto',
-            ADVANCED_OVERRIDES={'blas_threads': 1, 'angle_batch_size': 32}))
-        self.assertEqual(settings['EXECUTION_OPTIONS']['factorization'], 'adaptive')
-        self.assertEqual(settings['BLAS_THREADS_PER_WORKER'], 1)
-        self.assertEqual(_validate_settings('2d', settings), settings)
+    def test_portable_requests_reject_two_dimensional_solves(self):
+        from ghost_backend.hpc.bundle import BundleError, _validate_settings
+        with self.assertRaisesRegex(BundleError, 'run_hpc_monostatic'):
+            _validate_settings('2d', dict(FREQUENCIES_GHZ=[1.]))
 
     def test_auto_prefers_fast_dense_when_parallelism_cannot_improve(self):
         options = validate_options(dict(assembly_threads=1, blas_threads=1))

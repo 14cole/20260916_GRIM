@@ -1,4 +1,4 @@
-"""New-run defaults and explicit saved-profile compatibility."""
+"""The automatic run profile and its driver and GUI resolution."""
 import os
 from pathlib import Path
 import sys
@@ -8,30 +8,46 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from ghost_backend.execution.options import DEFAULTS, efficient_defaults, from_environment, validate_options, geometry_preset
+from ghost_backend.execution.options import (
+    DEFAULTS, automatic_options, automatic_run, efficient_defaults, from_environment, validate_for_run, validate_options,
+)
 from ghost_backend.runs.execution import driver_options
-from ghost_backend.runs.config import configuration_payload
 
 
 class EfficientDefaultsTests(unittest.TestCase):
-    def test_geometry_presets_preserve_certified_pec_and_mixed_fields(self):
+    def test_automatic_run_certifies_and_backends_preserve_pec_and_mixed_fields(self):
         import numpy as np
         from ghost_backend.twod.solver import solve_monostatic_rcs_2d_certified
         from test_experimental_cpu import fixture, fields
         for material in ('pec', 'mixed'):
             results = []
-            for name in ('small', 'balanced', 'large'):
-                preset = geometry_preset(name)
+            for factorization, method in (('dense', 'direct'), ('compressed', 'experimental_cpu')):
+                options = dict(efficient_defaults(), factorization=factorization, mesh_strategy='global')
                 result = solve_monostatic_rcs_2d_certified(fixture(material,64), [.6], list(range(361)),
-                    geometry_units='meters', solver_method=preset['solver_method'], execution_options=preset['execution_options'])
+                    geometry_units='meters', solver_method=method, execution_options=options)
                 self.assertTrue(result['metadata']['mesh_convergence_certified'])
                 results.append(result)
-            for result in results[1:]:
-                for pol in ('VV','HH'):
-                    a,b = fields(results[0],pol),fields(result,pol)
-                    self.assertLess(float(np.max(abs(a-b))/np.max(abs(a))), 1e-10)
-            self.assertEqual(results[-1]['metadata']['execution_threads'],
+            for pol in ('VV','HH'):
+                a,b = fields(results[0],pol),fields(results[1],pol)
+                self.assertLess(float(np.max(abs(a-b))/np.max(abs(a))), 1e-10)
+            run = automatic_run('monostatic')
+            result = solve_monostatic_rcs_2d_certified(fixture(material,64), [.6], list(range(361)),
+                geometry_units='meters', solver_method=run['solver_method'], execution_options=run['execution_options'])
+            self.assertTrue(result['metadata']['mesh_convergence_certified'])
+            self.assertEqual(result['metadata']['execution_threads'],
                 dict(assembly=efficient_defaults()['assembly_threads'],blas=efficient_defaults()['blas_threads']))
+
+    def test_automatic_run_matches_each_scattering_capability(self):
+        monostatic, bistatic = automatic_run('monostatic'), automatic_run('bistatic')
+        self.assertEqual((monostatic['solver_method'], monostatic['lu_precision']), ('auto', 'double'))
+        self.assertEqual(monostatic['execution_options'], automatic_options())
+        self.assertEqual((bistatic['solver_method'], bistatic['execution_options']['factorization'],
+                          bistatic['execution_options']['mesh_strategy']), ('direct', 'dense', 'global'))
+        for scattering, run in (('monostatic', monostatic), ('bistatic', bistatic)):
+            validate_for_run(run['execution_options'], run['solver_method'], run['lu_precision'], scattering)
+        self.assertEqual(automatic_options(12)['ram_budget_gib'], 12.)
+        with self.assertRaises(ValueError):
+            automatic_run('forward')
 
     def test_preset_and_launch_overrides_do_not_change_serialized_v1_defaults(self):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(os, 'cpu_count', return_value=8):
@@ -52,24 +68,16 @@ class EfficientDefaultsTests(unittest.TestCase):
             self.assertEqual(efficient_defaults()['blas_threads'], 1)
             self.assertEqual(efficient_defaults()['assembly_threads'], 1)
 
-    def test_new_drivers_use_preset_and_explicit_reference_profiles_still_work(self):
+    def test_drivers_resolve_to_the_automatic_profile(self):
         import run_local_monostatic as local
         import run_hpc_monostatic as hpc
         with mock.patch.dict(os.environ, {}, clear=True):
             for driver in (local,hpc):
-                self.assertEqual(driver.SOLVER_METHOD, 'auto')
-                self.assertEqual(driver.LU_PRECISION, 'double')
+                for name in ('SOLVER_METHOD', 'LU_PRECISION', 'SOLVE_PRESET', 'EXECUTION_OPTIONS', '_CONFIG_KEYS'):
+                    self.assertFalse(hasattr(driver, name), name)
                 self.assertTrue(driver.MESH_CERTIFICATION)
-                profile = driver_options(vars(driver))
-                self.assertEqual(profile, efficient_defaults())
-                explicit = dict(vars(driver), EXECUTION_OPTIONS=validate_options(dict(factorization='dense')),
-                                SOLVER_METHOD='direct', LU_PRECISION='mixed')
-                self.assertEqual(driver_options(explicit)['factorization'], 'dense')
-                # The named automatic preset remains authoritative; a manual
-                # kernel choice requires the explicit custom preset.
-                self.assertEqual(driver_options(dict(vars(driver), SOLVE_PRESET='custom', SOLVER_METHOD='direct'))['factorization'], 'dense')
-            payload = configuration_payload('2d', {'LU_PRECISION':'mixed'}, local._CONFIG_KEYS)
-            self.assertEqual(payload['settings']['SOLVER_METHOD'], 'direct')
+                self.assertEqual(driver_options(vars(driver)), automatic_options())
+                self.assertEqual(driver_options(dict(vars(driver), MAX_SOLVE_GB=24))['ram_budget_gib'], 24.)
 
 
 if __name__ == '__main__':
