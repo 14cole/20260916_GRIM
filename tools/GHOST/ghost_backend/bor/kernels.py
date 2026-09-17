@@ -633,6 +633,11 @@ def _checked_near_kernels(rule, args, k, m_max, order, tail_order, bracket):
                             (128 * (core + tail) * max(min(nm, 32), 16))))
     for start in range(0, n, point_chunk):
         stop = min(n, start + point_chunk)
+        # Absolute indices of the points in this chunk that still need a
+        # higher angular order.  Each point's kernel depends only on its own
+        # coordinates, so refining a subset reproduces its per-point values;
+        # points that already meet the tolerance keep their accepted result.
+        active = np.arange(start, stop)
         part = tuple(a[start:stop] for a in args)
 
 
@@ -651,7 +656,7 @@ def _checked_near_kernels(rule, args, k, m_max, order, tail_order, bracket):
             fine_chunk = max(1, int(NEAR_KERNEL_WORK_BYTES /
                                    (128 * (cf + tf) * max(min(nm, 32), 16))))
             fine = tuple(np.empty_like(x) for x in coarse)
-            for i in range(0, stop - start, fine_chunk):
+            for i in range(0, len(active), fine_chunk):
                 val = rule(*(a[i:i + fine_chunk] for a in part), k, m_max,
                            order=cf, tail_order=tf)
                 val = val if bracket else (val,)
@@ -660,11 +665,19 @@ def _checked_near_kernels(rule, args, k, m_max, order, tail_order, bracket):
             scale = np.maximum.reduce([np.max(np.abs(x), axis=1) for x in fine])
             error = np.maximum.reduce([np.max(np.abs(x - y), axis=1)
                                        for x, y in zip(fine, coarse)])
-            if np.all(np.isfinite(error)) and np.all(error <= NEAR_ANGULAR_RTOL * np.maximum(scale, 1e-280)):
-                for out, x in zip(outputs, fine):
-                    out[start:stop] = x
+            converged = np.isfinite(error) & (
+                error <= NEAR_ANGULAR_RTOL * np.maximum(scale, 1e-280)
+            )
+            for out, x in zip(outputs, fine):
+                out[active[converged]] = x[converged]
+            if np.all(converged):
                 break
-            coarse, c, t = fine, cf, tf
+            pending = ~converged
+            active = active[pending]
+            part = tuple(a[pending] for a in part)
+            coarse = tuple(x[pending] for x in fine)
+            error, scale = error[pending], scale[pending]
+            c, t = cf, tf
     return outputs if bracket else outputs[0]
 
 

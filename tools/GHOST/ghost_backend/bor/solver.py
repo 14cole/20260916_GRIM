@@ -1,6 +1,10 @@
 """Body-of-revolution RCS solves for PEC, IBC, dielectric and layered materials."""
 
+import contextlib
+import functools
+import inspect
 import math
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -16,6 +20,7 @@ from ghost_backend.bor.kernels import (
     C0,
     ETA0,
     FFT_BUILD_BUDGET,
+    NEAR_KERNEL_WORK_BYTES,
     N_XI_SAFETY_CAP,
     Generatrix,
     cached_leggauss,
@@ -211,6 +216,37 @@ def _guard_bor_dense_memory(
             )
         )
     return required
+
+
+# Near-pair integration scratch is bounded per task by NEAR_KERNEL_WORK_BYTES
+# (plus coarse/fine copies), so concurrent tasks are capped by a fixed total.
+# Measured speedup saturates near 4x at 8 threads (GIL-bound small NumPy calls).
+NEAR_PREPARATION_SCRATCH_BYTES = 1 << 30
+_NEAR_TASK_SCRATCH_BYTES = 3 * NEAR_KERNEL_WORK_BYTES
+
+
+def _near_preparation_workers(workers: 'int') -> 'int':
+    return max(1, min(int(workers),
+                      NEAR_PREPARATION_SCRATCH_BYTES // _NEAR_TASK_SCRATCH_BYTES))
+
+
+def _map_near_pairs(function: 'Callable', pairs, workers: 'int') -> 'List':
+    """Evaluate ``function`` per pair, in order, on a bounded thread pool.
+
+    The first failure (including an abort raised by a checkpoint) cancels
+    work that has not started and is re-raised.
+    """
+
+    pairs = list(pairs)
+    count = min(_near_preparation_workers(workers), len(pairs))
+    if count <= 1:
+        return [function(pair) for pair in pairs]
+    executor = ThreadPoolExecutor(max_workers=count)
+    try:
+        futures = [executor.submit(function, pair) for pair in pairs]
+        return [future.result() for future in futures]
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _graded_cells(kind: 'str', depth: 'int' = 4) -> 'List[Tuple[float, float, float, float]]':
@@ -1191,7 +1227,7 @@ class BorPecSolver:
             self._prepare_near_contractions(kind, pairs, m_max)
         return self._near_contractions[key]
 
-    def _prepare_near_contractions(self, kind, pairs, m_max):
+    def _prepare_near_contractions(self, kind, pairs, m_max, workers=1):
         """Prepare compact mode blocks with bounded point-level scratch."""
         key = (kind, int(m_max))
         if key in self._near_contractions:
@@ -1199,26 +1235,34 @@ class BorPecSolver:
         count = 4 * len(pairs)
         rows, cols, sources = (np.empty(count, dtype=np.intp) for _ in range(3))
         values = np.empty((4, 2 * m_max + 1, count), complex)
-        for pi, (e, f) in enumerate(pairs):
+
+        def integrate(pair):
             if self._checkpoint is not None:
                 self._checkpoint()
-            sl = slice(4 * pi, 4 * pi + 4)
-            rows[sl] = (e, e, e + 1, e + 1)
-            cols[sl] = (f, f + 1, f, f + 1)
-            sources[sl] = f
+            e, f = pair
             if abs(e - f) <= 1:
                 cell = ('diag' if e == f else
                         ('corner10' if f == e + 1 else 'corner01'))
                 blocks = _contract_near_points(self.gen, e, self.gen, f,
                     self.k, m_max, (kind,), _cell_points(cell, depth=self.near_depth))
-            else:
-                blocks, order, error = _converged_disjoint_blocks(
-                    self.gen, e, self.gen, f, self.k, m_max, (kind,))
+                return blocks[kind], None
+            blocks, order, error = _converged_disjoint_blocks(
+                self.gen, e, self.gen, f, self.k, m_max, (kind,))
+            return blocks[kind], (order, error)
+
+        results = _map_near_pairs(integrate, pairs, workers)
+        for pi, ((e, f), (block, refinement)) in enumerate(zip(pairs, results)):
+            sl = slice(4 * pi, 4 * pi + 4)
+            rows[sl] = (e, e, e + 1, e + 1)
+            cols[sl] = (f, f + 1, f, f + 1)
+            sources[sl] = f
+            if refinement is not None:
+                order, error = refinement
                 self.near_quadrature_order_max = max(
                     getattr(self, 'near_quadrature_order_max', 0), order)
                 self.near_quadrature_error_max = max(
                     getattr(self, 'near_quadrature_error_max', 0.), error)
-            values[:, :, sl] = blocks[kind].reshape(4, 2 * m_max + 1, 4)
+            values[:, :, sl] = block.reshape(4, 2 * m_max + 1, 4)
         self._near_contractions[key] = dict(rows=rows, cols=cols,
             source_elems=sources, values=values)
         self._near_cache.pop(m_max if kind == 'efie' else (kind, m_max), None)
@@ -1229,8 +1273,9 @@ class BorPecSolver:
                           workers: 'int' = 1) -> 'None':
         """Build every kernel table and near-pair cache this solver will need
         up front, so parallel per-mode assembly only READS shared state.
-        Near integration is sequential and bounded; workers parallelize mode
-        assembly after these immutable compact blocks have been prepared."""
+        Near-pair integration runs on a bounded thread pool (see
+        ``_near_preparation_workers``) and stores results in pair order, so
+        the prepared blocks are identical to a serial build."""
 
         ne = self.gen.n_elems
         pairs = [
@@ -1241,7 +1286,7 @@ class BorPecSolver:
         if self._compressed:
             for kind, enabled in (('efie', efie), ('mfie', mfie), ('ibc', ibc)):
                 if enabled:
-                    self._prepare_near_contractions(kind, pairs, m_max)
+                    self._prepare_near_contractions(kind, pairs, m_max, workers)
             return
         streaming = self._stream is not None
         if not streaming and (efie or mfie or ibc):
@@ -1258,11 +1303,11 @@ class BorPecSolver:
             if not (streaming and self._stream.B is not None):
                 self._ibc_tables(m_max)
         if efie:
-            self._prepare_near_contractions("efie", pairs, m_max)
+            self._prepare_near_contractions("efie", pairs, m_max, workers)
         if mfie:
-            self._prepare_near_contractions("mfie", pairs, m_max)
+            self._prepare_near_contractions("mfie", pairs, m_max, workers)
         if ibc:
-            self._prepare_near_contractions("ibc", pairs, m_max)
+            self._prepare_near_contractions("ibc", pairs, m_max, workers)
 
 
     def basis_mask(self, m: 'int') -> 'np.ndarray':
@@ -1552,18 +1597,58 @@ class BorPecSolver:
         return f_theta, f_phi
 
 
-def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
-                assemble: 'Callable', rhs: 'Callable', farfield: 'Callable',
-                prepare: 'Optional[Callable]' = None, workers: 'int' = 1,
-                progress: 'Optional[Callable]' = None,
-                check_abort: 'Optional[Callable]' = None,
-                monitor_cond: 'bool' = False,
-                rhs_batch: 'Optional[Callable]' = None,
-                farfield_batch: 'Optional[Callable]' = None,
-                min_mode_before_tail: 'int' = 0,
-                assembly_peak_gb: 'float' = 0.0,
-                memory_context: 'str' = "The BoR solve",
-                signed_mode_symmetry: 'bool' = False):
+@contextlib.contextmanager
+def _bounded_blas_threads(workers: 'int'):
+    """Give each concurrent mode worker a share of the cores for BLAS.
+
+    Mode workers, streaming tiles, and near-pair preparation all run on
+    Python threads that call BLAS.  An unconfigured OpenBLAS pool uses every
+    core per call, so ``workers`` concurrent LU factorizations oversubscribe
+    the machine by ~workers x cores (a 254-DOF LU measured ~9000x slower).
+    Limits already set lower by a caller (execution scopes, HPC pinning) are
+    never raised.  If another thread currently owns the process-wide BLAS
+    controls, the existing limits are left untouched.
+    """
+
+    from ghost_backend.execution.options import _BLAS_LOCK
+    from ghost_backend.execution.thread_control import (
+        threadpool_info,
+        threadpool_limits,
+    )
+
+    per_worker = max(1, (os.cpu_count() or 1) // max(1, int(workers)))
+    current = [
+        int(pool["num_threads"])
+        for pool in threadpool_info()
+        if pool.get("user_api") == "blas"
+        and isinstance(pool.get("num_threads"), int)
+        and pool["num_threads"] > 0
+    ]
+    if not current or max(current) <= per_worker:
+        yield
+        return
+    if not _BLAS_LOCK.acquire(blocking=False):
+        yield
+        return
+    try:
+        with threadpool_limits(limits=per_worker, user_api="blas"):
+            yield
+    finally:
+        _BLAS_LOCK.release()
+
+
+def _mode_sweep_impl(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
+                     assemble: 'Callable', rhs: 'Callable', farfield: 'Callable',
+                     prepare: 'Optional[Callable]' = None, workers: 'int' = 1,
+                     progress: 'Optional[Callable]' = None,
+                     check_abort: 'Optional[Callable]' = None,
+                     monitor_cond: 'bool' = False,
+                     rhs_batch: 'Optional[Callable]' = None,
+                     farfield_batch: 'Optional[Callable]' = None,
+                     min_mode_before_tail: 'int' = 0,
+                     assembly_peak_gb: 'float' = 0.0,
+                     memory_context: 'str' = "The BoR solve",
+                     signed_mode_symmetry: 'bool' = False):
     """
     Shared adaptive azimuthal-mode loop for every BoR formulation.
 
@@ -1826,6 +1911,13 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
         stats["max_cond"] = max(conds)
         stats["median_cond"] = float(np.median(conds))
     return F, modes_used, stats
+
+
+@functools.wraps(_mode_sweep_impl)
+def _mode_sweep(*args, **kwargs):
+    bound = inspect.signature(_mode_sweep_impl).bind(*args, **kwargs)
+    with _bounded_blas_threads(bound.arguments.get("workers", 1)):
+        return _mode_sweep_impl(*args, **kwargs)
 
 
 def _mode_cap_warning(stats: 'Dict', mode_tol: 'float') -> 'Optional[str]':
@@ -3202,23 +3294,30 @@ class BorCrossOperators:
         self._B = tuple(value.astype(table_dtype, copy=False) for value in B)
         return self._G, self._B
 
+    def _integrate_near(self, e, f, m_max):
+        """Return (blocks, (order, error) or None) without touching state."""
+        kind = self.pair_kind.get((e, f))
+        if kind is not None:
+            return _contract_near_points(self.sp.gen, e, self.sq.gen, f,
+                self.k, m_max, ('efie', 'ibc'), _cell_points(kind)), None
+        blocks, order, error = _converged_disjoint_blocks(
+            self.sp.gen, e, self.sq.gen, f, self.k, m_max,
+            ('efie', 'ibc'), self.near_order, self.near_rtol, self.near_max_order)
+        return blocks, (order, error)
+
+    def _store_near(self, e, f, m_max, blocks, refinement):
+        if refinement is not None:
+            order, error = refinement
+            self.near_quadrature_order_max = max(self.near_quadrature_order_max, order)
+            self.near_quadrature_error_max = max(self.near_quadrature_error_max, error)
+        self._cache.setdefault(m_max, {})[(e, f)] = blocks
+
     def _near_data(self, e, f, m_max):
         """Cache only converged 2x2 EFIE and rotated-PV mode blocks."""
         cache = self._cache.setdefault(m_max, {})
-        key = (e, f)
-        if key not in cache:
-            kind = self.pair_kind.get(key)
-            if kind is not None:
-                blocks = _contract_near_points(self.sp.gen, e, self.sq.gen, f,
-                    self.k, m_max, ('efie', 'ibc'), _cell_points(kind))
-            else:
-                blocks, order, error = _converged_disjoint_blocks(
-                    self.sp.gen, e, self.sq.gen, f, self.k, m_max,
-                    ('efie', 'ibc'), self.near_order, self.near_rtol, self.near_max_order)
-                self.near_quadrature_order_max = max(self.near_quadrature_order_max, order)
-                self.near_quadrature_error_max = max(self.near_quadrature_error_max, error)
-            cache[key] = blocks
-        return cache[key]
+        if (e, f) not in cache:
+            self._store_near(e, f, m_max, *self._integrate_near(e, f, m_max))
+        return cache[(e, f)]
 
     def assemble_T(self, m: 'int', m_max: 'int') -> 'np.ndarray':
         """Cross EFIE operator [2Np, 2Nq] (same normalization as
@@ -3286,16 +3385,22 @@ class BorCrossOperators:
         P[Np:, Nq:] = Bft
         return P
 
-    def prepare(self, m_max: 'int') -> 'None':
+    def prepare(self, m_max: 'int', workers: 'int' = 1) -> 'None':
         """Warm every table/near cache (see BorPecSolver.prepare_operators)."""
         if self._stream is None and not self.sp._compressed:
             self.sp._ensure_dense_point_matrices()
             self.sq._ensure_dense_point_matrices()
             self._tables(m_max)
-        for e, f in self.near_pairs:
+        cached = self._cache.get(m_max, {})
+        pending = [pair for pair in self.near_pairs if pair not in cached]
+
+        def integrate(pair):
             if self.sp._checkpoint is not None:
                 self.sp._checkpoint()
-            self._near_data(e, f, m_max)
+            return self._integrate_near(pair[0], pair[1], m_max)
+
+        for (e, f), result in zip(pending, _map_near_pairs(integrate, pending, workers)):
+            self._store_near(e, f, m_max, *result)
 
 
 @profiled_solve
@@ -3470,8 +3575,8 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
         se.prepare_operators(mm, efie=True, ibc=True, workers=solve_workers)
         sLo.prepare_operators(mm, efie=True, ibc=True, workers=solve_workers)
         sLc.prepare_operators(mm, efie=True, workers=solve_workers)
-        Xoc.prepare(mm)
-        Xco.prepare(mm)
+        Xoc.prepare(mm, workers=solve_workers)
+        Xco.prepare(mm, workers=solve_workers)
 
     def assemble(m):
         T_e = se.assemble_mode(m, m_max)
@@ -3835,7 +3940,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
             b.prepare_operators(mm, efie=True, ibc=zs_elems[bi] is not None,
                                 workers=planned_workers)
         for X in all_crosses:
-            X.prepare(mm)
+            X.prepare(mm, workers=planned_workers)
 
 
         for representative in range(min(int(mm), 2) + 1):
@@ -3930,6 +4035,18 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
         _Q_cache[category] = Q
         return Q
 
+    _Q_sparse_cache: 'Dict[int, Tuple[csr_matrix, csr_matrix]]' = {}
+
+    def Q_sparse(m):
+        """(Q, Q^H) as CSR, converted once per category (see _MultiRegionBor)."""
+        category = int(m) if abs(int(m)) == 1 else (0 if m == 0 else 2)
+        cached = _Q_sparse_cache.get(category)
+        if cached is None:
+            Q = csr_matrix(build_Q(m))
+            cached = (Q, Q.conj().T.tocsr())
+            _Q_sparse_cache[category] = cached
+        return cached
+
     def assemble(m):
         A = modal_matrix((n_full, n_full), compressed_requested())
         sl_Jd = slice(off_Jd, off_Jd + 2 * Nd)
@@ -3982,10 +4099,10 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
         V[off_M:off_M + 2 * Nd] = ETA0 * sd_e.rhs_h_mode(m, th, pol)
         for bi, b in enumerate(bares):
             V[off_J1[bi]:off_J1[bi] + 2 * N1[bi]] = b.rhs_mode(m, th, pol)
-        return csr_matrix(build_Q(m)).conj().T @ V
+        return Q_sparse(m)[1] @ V
 
     def farfield(m, x_red, th, pol):
-        x = csr_matrix(build_Q(m)) @ x_red
+        x = Q_sparse(m)[0] @ x_red
         fth, fph = sd_e.farfield_mode(m, x[off_Jd:off_Jd + 2 * Nd], th,
                                       msol=ETA0 * x[off_M:off_M + 2 * Nd])
         for bi, b in enumerate(bares):
@@ -4029,7 +4146,8 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
                                        monitor_cond=True,
                                        min_mode_before_tail=mode_tail_start,
                                        assembly_peak_gb=plan["assembly_peak_gb"],
-                                       memory_context="The partial-coating BoR solve")
+                                       memory_context="The partial-coating BoR solve",
+                                       signed_mode_symmetry=True)
     _require_mode_convergence(stats, mode_tol)
     streams = {
         "interface_exterior": sd_e._stream,
@@ -4180,6 +4298,7 @@ class _MultiRegionBor:
                     raise ValueError("Junction surface shares no region with "
                                      "the junction master.")
         self._Q_cache: 'Dict[int, np.ndarray]' = {}
+        self._Q_sparse_cache: 'Dict[int, Tuple[csr_matrix, csr_matrix]]' = {}
 
 
     def enable_streaming(self, m_max: 'int', plan: 'Dict[str, Any]') -> 'None':
@@ -4211,7 +4330,7 @@ class _MultiRegionBor:
             s.prepare_operators(m_max, efie=True, ibc=not self.is_cond[si],
                                 workers=workers)
         for X in self.X.values():
-            X.prepare(m_max)
+            X.prepare(m_max, workers=workers)
 
 
         for representative in range(min(int(m_max), 2) + 1):
@@ -4306,6 +4425,21 @@ class _MultiRegionBor:
         self._Q_cache[category] = Q
         return Q
 
+    def _Q_sparse(self, m: 'int') -> 'Tuple[csr_matrix, csr_matrix]':
+        """(Q, Q^H) as CSR, built once per constraint category.
+
+        Excitation and far-field closures run once per aspect and
+        polarization; converting the dense constraint matrix on each call
+        cost O(n_full * n_reduced) apiece.
+        """
+        category = int(m) if abs(int(m)) == 1 else (0 if m == 0 else 2)
+        cached = self._Q_sparse_cache.get(category)
+        if cached is None:
+            Q = csr_matrix(self.build_Q(m))
+            cached = (Q, Q.conj().T.tocsr())
+            self._Q_sparse_cache[category] = cached
+        return cached
+
     def assemble(self, m: 'int', m_max: 'int'):
         A = modal_matrix((self.n_full, self.n_full), compressed_requested())
         for ri, reg in enumerate(self.regions):
@@ -4343,10 +4477,10 @@ class _MultiRegionBor:
             if self.off_M[si] is not None:
                 V[self.off_M[si]:self.off_M[si] + 2 * self.Nn[si]] = \
                     ETA0 * s.rhs_h_mode(m, th, pol)
-        return csr_matrix(self.build_Q(m)).conj().T @ V
+        return self._Q_sparse(m)[1] @ V
 
     def farfield(self, m: 'int', x_red: 'np.ndarray', th: 'float', pol: 'str') -> 'complex':
-        x = csr_matrix(self.build_Q(m)) @ x_red
+        x = self._Q_sparse(m)[0] @ x_red
         fth = fph = 0.0
         for (si, _) in self.regions[self.ext_region]["bounds"]:
             s = self.solv[(si, self.ext_region)]
@@ -4402,7 +4536,8 @@ def _solve_multiregion(sys_: '_MultiRegionBor', freq_hz, thetas_deg, n_modes,
         workers=plan["workers"], progress=progress, check_abort=check_abort,
         monitor_cond=True, min_mode_before_tail=mode_tail_start,
         assembly_peak_gb=plan["assembly_peak_gb"],
-        memory_context=f"The {formulation} BoR solve")
+        memory_context=f"The {formulation} BoR solve",
+        signed_mode_symmetry=True)
     _require_mode_convergence(stats, mode_tol)
     extra = {**extra, **stats}
     warnings = list(extra.get("warnings", []) or [])
