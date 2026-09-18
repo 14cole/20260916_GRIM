@@ -15,10 +15,16 @@ import os
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
-
 from GRIM_Backend.execution.diagnostics import GHOST_SENTINELS, ghost_module_paths
+
+_GUI_IMPORT_ERROR: Exception | None = None
+try:  # Backend discovery and module loading must import without a display.
+    from PySide6.QtCore import Signal
+    from PySide6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
+except (ImportError, RuntimeError) as exc:  # pragma: no cover - environment-specific
+    _GUI_IMPORT_ERROR = exc
+
+GUI_AVAILABLE = _GUI_IMPORT_ERROR is None
 
 
 GHOST_BACKEND_ENV = "GHOST_BACKEND_PATH"
@@ -186,107 +192,120 @@ def _load_workspace_class(backend: Path | None):
         )
     return workspace
 
+if GUI_AVAILABLE:
 
-class GhostIntegrationWidget(QWidget):
-    """Host GHOST inside GRIM, or show an actionable unavailable message."""
+    class GhostIntegrationWidget(QWidget):
+        """Host GHOST inside GRIM, or show an actionable unavailable message."""
 
-    files_exported = Signal(list, str)
+        files_exported = Signal(list, str)
 
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        *,
-        backend_path: str | os.PathLike[str] | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.backend_path = discover_ghost_backend(backend_path)
-        self.workspace = None
-        self.load_error = ""
+        def __init__(
+            self,
+            parent: QWidget | None = None,
+            *,
+            backend_path: str | os.PathLike[str] | None = None,
+        ) -> None:
+            super().__init__(parent)
+            self.backend_path = discover_ghost_backend(backend_path)
+            self.workspace = None
+            self.load_error = ""
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        try:
-            workspace_class = _load_workspace_class(self.backend_path)
-            self.workspace = workspace_class(self)
-        except Exception as exc:
-            self.load_error = str(exc)
-            message = QLabel(
-                "GHOST solver workspace is unavailable.\n\n"
-                "Keep tools/GHOST with this GRIM checkout, or set "
-                f"{GHOST_BACKEND_ENV} explicitly to one complete Backend "
-                "folder.\n\n"
-                f"Details: {self.load_error}"
-            )
-            message.setWordWrap(True)
-            layout.addWidget(message)
-        else:
-            layout.addWidget(self.workspace)
-            self.workspace.files_exported.connect(self.files_exported.emit)
-
-    def solve_is_running(self) -> bool:
-        return bool(
-            self.workspace is not None
-            and self.workspace.solve_is_running()
-        )
-
-    def focus_solver(self) -> None:
-        if self.workspace is not None:
-            self.workspace.setCurrentWidget(self.workspace.solver_tab)
-
-    def apply_application_palette(
-        self,
-        palette: Mapping[str, object],
-    ) -> bool:
-        """Apply host colors to GHOST's Matplotlib geometry/solver canvases."""
-
-        if self.workspace is None:
-            return False
-        applied = False
-        for tab_name in ("geometry_tab", "solver_tab"):
-            plot_tab = getattr(self.workspace, tab_name, None)
-            apply_plot_theme = getattr(plot_tab, "apply_plot_theme", None)
-            if callable(apply_plot_theme):
-                apply_plot_theme(
-                    background=str(palette["panel_bg"]),
-                    text=str(palette["text"]),
-                    grid=str(palette["grid"]),
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            try:
+                workspace_class = _load_workspace_class(self.backend_path)
+                self.workspace = workspace_class(self)
+            except Exception as exc:
+                self.load_error = str(exc)
+                message = QLabel(
+                    "GHOST solver workspace is unavailable.\n\n"
+                    "Keep tools/GHOST with this GRIM checkout, or set "
+                    f"{GHOST_BACKEND_ENV} explicitly to one complete Backend "
+                    "folder.\n\n"
+                    f"Details: {self.load_error}"
                 )
-                applied = True
-        return applied
+                message.setWordWrap(True)
+                layout.addWidget(message)
+            else:
+                layout.addWidget(self.workspace)
+                self.workspace.files_exported.connect(self.files_exported.emit)
 
-    def attach_material_artifact(
-        self,
-        kind: str,
-        path: str | os.PathLike[str],
-    ) -> bool:
-        """Attach a FREDDY material/IBC artifact to the active GHOST geometry."""
+        def solve_is_running(self) -> bool:
+            return bool(
+                self.workspace is not None
+                and self.workspace.solve_is_running()
+            )
 
-        if self.workspace is None:
-            QMessageBox.warning(
-                self,
-                "GHOST Unavailable",
-                "The material file was exported, but it could not be attached "
-                "because the GHOST workspace is unavailable. Open the GHOST "
-                "tab for backend details, then attach the file after GHOST loads.",
+        def focus_solver(self) -> None:
+            if self.workspace is not None:
+                self.workspace.setCurrentWidget(self.workspace.solver_tab)
+
+        def apply_application_palette(
+            self,
+            palette: Mapping[str, object],
+        ) -> bool:
+            """Apply host colors to GHOST's Matplotlib geometry/solver canvases."""
+
+            if self.workspace is None:
+                return False
+            applied = False
+            for tab_name in ("geometry_tab", "solver_tab"):
+                plot_tab = getattr(self.workspace, tab_name, None)
+                apply_plot_theme = getattr(plot_tab, "apply_plot_theme", None)
+                if callable(apply_plot_theme):
+                    apply_plot_theme(
+                        background=str(palette["panel_bg"]),
+                        text=str(palette["text"]),
+                        grid=str(palette["grid"]),
+                    )
+                    applied = True
+            return applied
+
+        def attach_material_artifact(
+            self,
+            kind: str,
+            path: str | os.PathLike[str],
+        ) -> bool:
+            """Attach a FREDDY material/IBC artifact to the active GHOST geometry."""
+
+            if self.workspace is None:
+                QMessageBox.warning(
+                    self,
+                    "GHOST Unavailable",
+                    "The material file was exported, but it could not be attached "
+                    "because the GHOST workspace is unavailable. Open the GHOST "
+                    "tab for backend details, then attach the file after GHOST loads.",
+                )
+                return False
+            attach = getattr(self.workspace, "attach_material_artifact", None)
+            if not callable(attach):
+                QMessageBox.warning(
+                    self,
+                    "GHOST Attachment Unavailable",
+                    "The material file was exported, but this GHOST backend does "
+                    "not support automatic attachment. Update tools/GHOST with "
+                    "the rest of this GRIM checkout, then retry.",
+                )
+                return False
+            try:
+                return bool(attach(str(kind), os.fspath(path)))
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "GHOST Attachment Failed",
+                    "The material file was exported, but GHOST could not attach "
+                    f"it to the current geometry.\n\nDetails: {exc}",
+                )
+                return False
+
+
+else:
+
+    class GhostIntegrationWidget:  # pragma: no cover - exercised only without Qt
+        """Placeholder that preserves an actionable import-time API."""
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError(
+                "GhostIntegrationWidget requires PySide6. "
+                f"Original import error: {_GUI_IMPORT_ERROR}"
             )
-            return False
-        attach = getattr(self.workspace, "attach_material_artifact", None)
-        if not callable(attach):
-            QMessageBox.warning(
-                self,
-                "GHOST Attachment Unavailable",
-                "The material file was exported, but this GHOST backend does "
-                "not support automatic attachment. Update tools/GHOST with "
-                "the rest of this GRIM checkout, then retry.",
-            )
-            return False
-        try:
-            return bool(attach(str(kind), os.fspath(path)))
-        except Exception as exc:
-            QMessageBox.warning(
-                self,
-                "GHOST Attachment Failed",
-                "The material file was exported, but GHOST could not attach "
-                f"it to the current geometry.\n\nDetails: {exc}",
-            )
-            return False
