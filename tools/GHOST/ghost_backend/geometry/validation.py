@@ -96,18 +96,26 @@ class GeometryAudit:
         o3 = orient(bx1, by1, bx2, by2, ax1, ay1)
         o4 = orient(bx1, by1, bx2, by2, ax2, ay2)
 
-        if (o1 > tol and o2 < -tol or o1 < -tol and o2 > tol) and (
-            o3 > tol and o4 < -tol or o3 < -tol and o4 > tol
+        # `orient` is a cross product (length^2); comparing it to `tol` (a
+        # length) makes the effective clearance tolerance tol/length, so thin
+        # features get reported as intersections.  Scale each threshold by the
+        # length of the line it is measured against to recover a true
+        # perpendicular distance of `tol`.
+        ta = tol * max(math.hypot(ax2 - ax1, ay2 - ay1), 1e-12)
+        tb = tol * max(math.hypot(bx2 - bx1, by2 - by1), 1e-12)
+
+        if (o1 > ta and o2 < -ta or o1 < -ta and o2 > ta) and (
+            o3 > tb and o4 < -tb or o3 < -tb and o4 > tb
         ):
             return True
 
-        if abs(o1) <= tol and on_seg(ax1, ay1, ax2, ay2, bx1, by1):
+        if abs(o1) <= ta and on_seg(ax1, ay1, ax2, ay2, bx1, by1):
             return True
-        if abs(o2) <= tol and on_seg(ax1, ay1, ax2, ay2, bx2, by2):
+        if abs(o2) <= ta and on_seg(ax1, ay1, ax2, ay2, bx2, by2):
             return True
-        if abs(o3) <= tol and on_seg(bx1, by1, bx2, by2, ax1, ay1):
+        if abs(o3) <= tb and on_seg(bx1, by1, bx2, by2, ax1, ay1):
             return True
-        if abs(o4) <= tol and on_seg(bx1, by1, bx2, by2, ax2, ay2):
+        if abs(o4) <= tb and on_seg(bx1, by1, bx2, by2, ax2, ay2):
             return True
         return False
 

@@ -889,15 +889,23 @@ def _segment_intersects_strict(
     o3 = orient(b1, b2, a1)
     o4 = orient(b1, b2, a2)
 
-    if ((o1 > tol and o2 < -tol) or (o1 < -tol and o2 > tol)) and ((o3 > tol and o4 < -tol) or (o3 < -tol and o4 > tol)):
+    # `orient` is a cross product (length^2), so comparing it directly against
+    # `tol` (a length) makes the effective clearance tolerance tol/length --
+    # coarse for long primitives, catastrophic for short ones.  Scale each
+    # threshold by the length of the line it is measured against so the test
+    # is a true perpendicular distance of `tol`.
+    ta = tol * max(math.hypot(a2[0] - a1[0], a2[1] - a1[1]), EPS)
+    tb = tol * max(math.hypot(b2[0] - b1[0], b2[1] - b1[1]), EPS)
+
+    if ((o1 > ta and o2 < -ta) or (o1 < -ta and o2 > ta)) and ((o3 > tb and o4 < -tb) or (o3 < -tb and o4 > tb)):
         return True
-    if abs(o1) <= tol and on_seg(a1, b1, a2):
+    if abs(o1) <= ta and on_seg(a1, b1, a2):
         return True
-    if abs(o2) <= tol and on_seg(a1, b2, a2):
+    if abs(o2) <= ta and on_seg(a1, b2, a2):
         return True
-    if abs(o3) <= tol and on_seg(b1, a1, b2):
+    if abs(o3) <= tb and on_seg(b1, a1, b2):
         return True
-    if abs(o4) <= tol and on_seg(b1, a2, b2):
+    if abs(o4) <= tb and on_seg(b1, a2, b2):
         return True
     return False
 
