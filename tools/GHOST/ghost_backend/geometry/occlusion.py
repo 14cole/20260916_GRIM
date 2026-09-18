@@ -197,6 +197,9 @@ class Occluder:
 
 
     _LEAF_TRIANGLES = 256
+    # Rays per block in the batched leaf test; bounds the rays x triangles x 3
+    # working set to a few MB regardless of how many points are placed.
+    _LEAF_RAY_CHUNK = 512
 
     def __init__(self, triangles: 'np.ndarray', scale: 'float' = 1.0,
                  bias: 'Optional[float]' = None):
@@ -238,6 +241,7 @@ class Occluder:
         self._bvh_hi = None
         self._tri_edge1 = None
         self._tri_edge2 = None
+        self._bvh_box = ()
 
     @property
     def tris(self) -> 'np.ndarray':
@@ -271,6 +275,7 @@ class Occluder:
             clone._bvh_base = int(self._bvh_base)
             clone._bvh_lo = self._bvh_lo
             clone._bvh_hi = self._bvh_hi
+            clone._bvh_box = self._bvh_box
             clone._tri_edge1 = self._tri_edge1
             clone._tri_edge2 = self._tri_edge2
         clone._bvh_lock = threading.Lock()
@@ -378,6 +383,12 @@ class Occluder:
 
             self._bvh_lo = _immutable_array(bvh_lo)
             self._bvh_hi = _immutable_array(bvh_hi)
+            # Plain-float mirror for the per-ray slab test; see _aabb_entry.
+            self._bvh_box = [
+                (float(lo[0]), float(lo[1]), float(lo[2]),
+                 float(hi[0]), float(hi[1]), float(hi[2]))
+                for lo, hi in zip(bvh_lo, bvh_hi)
+            ]
             self._bvh_ready = True
 
     @property
@@ -393,59 +404,107 @@ class Occluder:
             "node_slots": int(2 * self._bvh_base) if self._bvh_ready else 0,
         }
 
-    def _aabb_entry(self, node: int, origin: 'np.ndarray',
-                    direction: 'np.ndarray', minimum_t: float) -> 'Optional[float]':
+    def _aabb_entry(self, node: int, origin, direction, minimum_t: float,
+                    boxes=None) -> 'Optional[float]':
+        """Slab test for one node.
 
+        ``origin``/``direction``/``boxes`` are plain Python floats and tuples
+        on the hot path: this runs once per node per ray, where pulling three
+        NumPy scalars out of an array costs more than the arithmetic.
+        """
 
         coordinate_tol = 4e-9 * self.diag
-        lo_values = self._bvh_lo[node]
-        hi_values = self._bvh_hi[node]
-        near = -np.inf
-        far = np.inf
+        box = (self._bvh_box if boxes is None else boxes)[node]
+        near = -math.inf
+        far = math.inf
         for axis in range(3):
-            lo = float(lo_values[axis]) - coordinate_tol
-            hi = float(hi_values[axis]) + coordinate_tol
+            lo = box[axis] - coordinate_tol
+            hi = box[axis + 3] + coordinate_tol
             if lo > hi:
                 return None
-            component = float(direction[axis])
+            component = direction[axis]
+            origin_axis = origin[axis]
             if abs(component) <= 1e-15:
-                if origin[axis] < lo or origin[axis] > hi:
+                if origin_axis < lo or origin_axis > hi:
                     return None
                 continue
-            t0 = (lo - origin[axis]) / component
-            t1 = (hi - origin[axis]) / component
+            t0 = (lo - origin_axis) / component
+            t1 = (hi - origin_axis) / component
             if t0 > t1:
                 t0, t1 = t1, t0
-            near = max(near, t0)
-            far = min(far, t1)
-            if far < max(near, minimum_t):
+            if t0 > near:
+                near = t0
+            if t1 < far:
+                far = t1
+            if far < (near if near > minimum_t else minimum_t):
                 return None
-        return max(near, minimum_t)
+        return near if near > minimum_t else minimum_t
 
-    def _leaf_hit(self, leaf: int, origin: 'np.ndarray',
-                  direction: 'np.ndarray', minimum_t: float) -> bool:
+    @staticmethod
+    def _cross_rows(a: 'np.ndarray', b: 'np.ndarray') -> 'np.ndarray':
+        """np.cross for (...,3) row stacks, without its per-call axis overhead.
+
+        np.cross spends ~10 us per call in moveaxis/normalize_axis_tuple
+        regardless of how few rows it is given, and the BVH calls it once per
+        leaf per ray.  The arithmetic below is the same textbook formula, so
+        the values are unchanged.
+        """
+        a0, a1, a2 = a[..., 0], a[..., 1], a[..., 2]
+        b0, b1, b2 = b[..., 0], b[..., 1], b[..., 2]
+        out = np.empty(np.broadcast(a, b).shape, dtype=np.result_type(a, b))
+        out[..., 0] = a1 * b2 - a2 * b1
+        out[..., 1] = a2 * b0 - a0 * b2
+        out[..., 2] = a0 * b1 - a1 * b0
+        return out
+
+    def _leaf_direction_terms(self, leaf: int, direction: 'np.ndarray',
+                              cache: 'Optional[dict]'):
+        """Leaf terms that depend on the look direction but not the ray origin.
+
+        Every point in one `visible` call shares a direction, so h, the
+        determinant and its reciprocal are computed once per leaf instead of
+        once per leaf per ray.
+        """
+        entry = None if cache is None else cache.get(leaf)
+        if entry is not None:
+            return entry
         leaf_index = leaf - self._bvh_base
         start = leaf_index * self._LEAF_TRIANGLES
         stop = min(start + self._LEAF_TRIANGLES, len(self.tris))
         if start >= stop:
+            entry = None
+        else:
+            tri0 = self.tris[start:stop, 0]
+            edge1 = self._tri_edge1[start:stop]
+            edge2 = self._tri_edge2[start:stop]
+            h = self._cross_rows(direction[None, :], edge2)
+            determinant = np.einsum("ij,ij->i", edge1, h)
+            determinant_tol = 1e-14 * (self.diag ** 2)
+            valid = np.abs(determinant) > determinant_tol
+            if not np.any(valid):
+                entry = None
+            else:
+                inverse = np.zeros_like(determinant)
+                inverse[valid] = 1.0 / determinant[valid]
+                entry = (tri0, edge1, edge2, h, inverse, valid)
+        if cache is not None:
+            cache[leaf] = entry
+        return entry
+
+    def _leaf_hit(self, leaf: int, origin: 'np.ndarray',
+                  direction: 'np.ndarray', minimum_t: float,
+                  cache: 'Optional[dict]' = None) -> bool:
+        terms = self._leaf_direction_terms(leaf, direction, cache)
+        if terms is None:
             return False
-        tri0 = self.tris[start:stop, 0]
-        edge1 = self._tri_edge1[start:stop]
-        edge2 = self._tri_edge2[start:stop]
-        h = np.cross(direction[None, :], edge2)
-        determinant = np.einsum("ij,ij->i", edge1, h)
-        determinant_tol = 1e-14 * (self.diag ** 2)
-        valid = np.abs(determinant) > determinant_tol
-        if not np.any(valid):
-            return False
-        inverse = np.zeros_like(determinant)
-        inverse[valid] = 1.0 / determinant[valid]
+        tri0, edge1, edge2, h, inverse, det_valid = terms
+        valid = det_valid.copy()
         s = origin[None, :] - tri0
         u = inverse * np.einsum("ij,ij->i", s, h)
         valid &= (u >= -1e-9) & (u <= 1.0 + 1e-9)
         if not np.any(valid):
             return False
-        q = np.cross(s, edge1)
+        q = self._cross_rows(s, edge1)
         v = inverse * (q @ direction)
         valid &= (v >= -1e-9) & ((u + v) <= 1.0 + 1e-9)
         if not np.any(valid):
@@ -453,10 +512,131 @@ class Occluder:
         distance = inverse * np.einsum("ij,ij->i", edge2, q)
         return bool(np.any(valid & (distance > minimum_t)))
 
+    def _aabb_mask(self, node: int, origins: 'np.ndarray', direction,
+                   minimum_t: float, boxes, coordinate_tol: float) -> 'np.ndarray':
+        """Slab test for one node against many origins sharing a direction.
+
+        The direction is common, so the per-axis t0/t1 swap is decided once by
+        its sign rather than per ray, and the running near/far bounds are the
+        same sequential maxima the scalar test forms.
+        """
+
+        box = boxes[node]
+        count = len(origins)
+        near = np.full(count, -np.inf)
+        far = np.full(count, np.inf)
+        alive = np.ones(count, dtype=bool)
+        for axis in range(3):
+            lo = box[axis] - coordinate_tol
+            hi = box[axis + 3] + coordinate_tol
+            if lo > hi:
+                return np.zeros(count, dtype=bool)
+            component = direction[axis]
+            origin_axis = origins[:, axis]
+            if abs(component) <= 1e-15:
+                alive &= (origin_axis >= lo) & (origin_axis <= hi)
+                continue
+            t0 = (lo - origin_axis) / component
+            t1 = (hi - origin_axis) / component
+            if component < 0.0:
+                t0, t1 = t1, t0
+            np.maximum(near, t0, out=near)
+            np.minimum(far, t1, out=far)
+        return alive & (far >= np.maximum(near, minimum_t))
+
+    def _leaf_hit_many(self, leaf: int, origins: 'np.ndarray',
+                       direction: 'np.ndarray', minimum_t: float,
+                       cache: 'Optional[dict]') -> 'np.ndarray':
+        """Moeller-Trumbore for many origins against one leaf, one direction."""
+
+        terms = self._leaf_direction_terms(leaf, direction, cache)
+        count = len(origins)
+        if terms is None:
+            return np.zeros(count, dtype=bool)
+        tri0, edge1, edge2, h, inverse, det_valid = terms
+        hit = np.zeros(count, dtype=bool)
+        # Bound the (rays x triangles x 3) working set.
+        chunk = max(1, self._LEAF_RAY_CHUNK)
+        for start in range(0, count, chunk):
+            block = origins[start:start + chunk]
+            s = block[:, None, :] - tri0[None, :, :]
+            u = inverse[None, :] * np.einsum("rtj,tj->rt", s, h)
+            valid = det_valid[None, :] & (u >= -1e-9) & (u <= 1.0 + 1e-9)
+            if not valid.any():
+                continue
+            q = self._cross_rows(s, edge1[None, :, :])
+            v = inverse[None, :] * (q @ direction)
+            valid &= (v >= -1e-9) & ((u + v) <= 1.0 + 1e-9)
+            if not valid.any():
+                continue
+            distance = inverse[None, :] * np.einsum("tj,rtj->rt", edge2, q)
+            hit[start:start + chunk] = np.any(
+                valid & (distance > minimum_t), axis=1
+            )
+        return hit
+
+    def _rays_hit_mesh(self, origins: 'np.ndarray', direction: 'np.ndarray',
+                       minimum_t: float,
+                       cancel_check: 'Optional[Callable[[], bool]]' = None
+                       ) -> 'np.ndarray':
+        """Blocked-ness of many origins along one shared direction.
+
+        One BVH walk carries the surviving ray set at each node instead of one
+        walk per ray.  A ray that has already hit is dropped, and the answer is
+        a per-ray "any triangle hit", so visiting order does not affect it.
+        """
+
+        boxes = self._bvh_box
+        coordinate_tol = 4e-9 * self.diag
+        direction_floats = (
+            float(direction[0]), float(direction[1]), float(direction[2])
+        )
+        count = len(origins)
+        blocked = np.zeros(count, dtype=bool)
+        root = np.flatnonzero(
+            self._aabb_mask(1, origins, direction_floats, minimum_t, boxes,
+                            coordinate_tol)
+        )
+        if not root.size:
+            return blocked
+        leaf_cache: 'dict' = {}
+        stack = [(1, root)]
+        visited = 0
+        while stack:
+            node, active = stack.pop()
+            visited += 1
+            if visited % 64 == 0 and self._cancelled(cancel_check):
+                raise InterruptedError("Body-shadow query cancelled.")
+            active = active[~blocked[active]]
+            if not active.size:
+                continue
+            if node >= self._bvh_base:
+                struck = self._leaf_hit_many(
+                    node, origins[active], direction, minimum_t, leaf_cache
+                )
+                if struck.any():
+                    blocked[active[struck]] = True
+                continue
+            for child in (2 * node + 1, 2 * node):
+                mask = self._aabb_mask(
+                    child, origins[active], direction_floats, minimum_t,
+                    boxes, coordinate_tol,
+                )
+                if mask.any():
+                    stack.append((child, active[mask]))
+        return blocked
+
     def _ray_hits_mesh(self, origin: 'np.ndarray', direction: 'np.ndarray',
                        minimum_t: float,
-                       cancel_check: 'Optional[Callable[[], bool]]' = None) -> bool:
-        root_entry = self._aabb_entry(1, origin, direction, minimum_t)
+                       cancel_check: 'Optional[Callable[[], bool]]' = None,
+                       leaf_cache: 'Optional[dict]' = None,
+                       origin_floats=None, direction_floats=None) -> bool:
+        boxes = self._bvh_box
+        o = origin_floats if origin_floats is not None else (
+            float(origin[0]), float(origin[1]), float(origin[2]))
+        dv = direction_floats if direction_floats is not None else (
+            float(direction[0]), float(direction[1]), float(direction[2]))
+        root_entry = self._aabb_entry(1, o, dv, minimum_t, boxes)
         if root_entry is None:
             return False
         stack = [(1, root_entry)]
@@ -467,13 +647,14 @@ class Occluder:
             if visited % 256 == 0 and self._cancelled(cancel_check):
                 raise InterruptedError("Body-shadow query cancelled.")
             if node >= self._bvh_base:
-                if self._leaf_hit(node, origin, direction, minimum_t):
+                if self._leaf_hit(node, origin, direction, minimum_t,
+                                  leaf_cache):
                     return True
                 continue
             left = 2 * node
             right = left + 1
-            left_entry = self._aabb_entry(left, origin, direction, minimum_t)
-            right_entry = self._aabb_entry(right, origin, direction, minimum_t)
+            left_entry = self._aabb_entry(left, o, dv, minimum_t, boxes)
+            right_entry = self._aabb_entry(right, o, dv, minimum_t, boxes)
 
             if left_entry is None:
                 if right_entry is not None:
@@ -514,13 +695,11 @@ class Occluder:
         if len(pts) == 0:
             return np.ones(0, dtype=bool)
         self.prepare_acceleration(cancel_check=cancel_check)
-        vis = np.ones(len(pts), dtype=bool)
-        for i, point in enumerate(pts):
-            if i % 64 == 0 and self._cancelled(cancel_check):
-                raise InterruptedError("Body-shadow query cancelled.")
-            vis[i] = not self._ray_hits_mesh(
-                point, d, e, cancel_check=cancel_check)
-        return vis
+        # Every point here shares one direction, so one BVH walk carries the
+        # whole point set and the direction-only leaf terms are built once.
+        return ~self._rays_hit_mesh(
+            np.ascontiguousarray(pts), d, e, cancel_check=cancel_check
+        )
 
     def visible_many(self, points: 'np.ndarray', directions: 'np.ndarray',
                      bias: 'Optional[float]' = None, *,

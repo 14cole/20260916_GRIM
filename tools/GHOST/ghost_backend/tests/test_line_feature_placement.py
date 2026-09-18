@@ -16,6 +16,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO.parent))
 
 import ghost_backend.assembly.place_features as place_features  # noqa: E402
+import ghost_backend.assembly.line_expansion as le  # noqa: E402
 import ghost_backend.assembly.fields as feature_sum
 from ghost_backend.geometry.frames import to_axis_frame
 from ghost_backend.assembly.line_expansion import SeamCoefficients, expand_perimeter
@@ -478,3 +479,52 @@ class EndpointNormalExpansionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class SeamSamplingTests(unittest.TestCase):
+    """Shared bracket search must reproduce the four np.interp calls exactly."""
+
+    @staticmethod
+    def _coefficients(count=181, seed=4):
+        rng = np.random.default_rng(seed)
+        phi = np.linspace(0.0, 180.0, count)
+        return le.SeamCoefficients(
+            10.0, phi,
+            rng.standard_normal(count) + 1j * rng.standard_normal(count),
+            rng.standard_normal(count) + 1j * rng.standard_normal(count),
+        )
+
+    def test_sample_matches_numpy_interp_bit_for_bit(self):
+        coefficients = self._coefficients()
+        rng = np.random.default_rng(6)
+        queries = np.concatenate([
+            rng.uniform(0.0, 180.0, 5000),
+            coefficients.phi_deg,                      # exactly on nodes
+            np.asarray([0.0, 180.0]),                  # endpoints
+        ])
+        got_tm, got_te = coefficients.sample(queries)
+        for got, source in ((got_tm, coefficients.dA_tm), (got_te, coefficients.dA_te)):
+            want = (np.interp(queries, coefficients.phi_deg, source.real)
+                    + 1j * np.interp(queries, coefficients.phi_deg, source.imag))
+            np.testing.assert_array_equal(got, want)
+
+    def test_scalar_and_out_of_support_behaviour_is_unchanged(self):
+        coefficients = self._coefficients(count=5)
+        tm, te = coefficients.sample(np.asarray(45.0))
+        self.assertEqual(np.shape(tm), ())
+        self.assertEqual(np.shape(te), ())
+        with self.assertRaisesRegex(ValueError, "outside characterized support"):
+            coefficients.sample(np.asarray([200.0]))
+
+    def test_repeated_interior_nodes_are_not_required(self):
+        # A coarse table still interpolates linearly between its own nodes.
+        coefficients = le.SeamCoefficients(
+            10.0, np.asarray([0.0, 90.0, 180.0]),
+            np.asarray([0.0, 2.0 + 2.0j, 0.0]),
+            np.asarray([1.0, 1.0, 1.0]),
+        )
+        tm, te = coefficients.sample(np.asarray([45.0, 135.0]))
+        np.testing.assert_allclose(tm, [1.0 + 1.0j, 1.0 + 1.0j], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(te, [1.0, 1.0], rtol=0.0, atol=0.0)
+
+if __name__ == "__main__":
+    unittest.main()

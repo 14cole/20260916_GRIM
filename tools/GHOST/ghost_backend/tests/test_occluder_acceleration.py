@@ -200,5 +200,109 @@ class OccluderAccelerationTests(unittest.TestCase):
         )
 
 
+
+
+def _shell(nu=40, nv=20, radius=0.5, length=2.0):
+    """Closed-ish cylindrical skin, enough triangles to build a real BVH."""
+    u = np.linspace(0.0, 2.0 * np.pi, nu, endpoint=False)
+    v = np.linspace(-0.5 * length, 0.5 * length, nv)
+    grid = np.stack([
+        np.outer(np.cos(u), np.ones(nv)) * radius,
+        np.outer(np.sin(u), np.ones(nv)) * radius,
+        np.outer(np.ones(nu), v),
+    ], axis=-1)
+    faces = []
+    for i in range(nu):
+        for j in range(nv - 1):
+            a, b = grid[i, j], grid[(i + 1) % nu, j]
+            c, d = grid[(i + 1) % nu, j + 1], grid[i, j + 1]
+            faces += [[a, b, c], [a, c, d]]
+    return np.asarray(faces)
+
+
+class BatchedTraversalTests(unittest.TestCase):
+    """The per-direction ray bundle must match the per-ray walk exactly.
+
+    `visible` carries every point through one BVH walk.  `_ray_hits_mesh` is
+    the original one-ray-at-a-time walk and is kept as the reference oracle.
+    """
+
+    def setUp(self):
+        self.occluder = Occluder(_shell())
+        self.occluder.prepare_acceleration()
+        rng = np.random.default_rng(11)
+        angle = rng.uniform(0.0, 2.0 * np.pi, 150)
+        self.points = np.column_stack([
+            0.52 * np.cos(angle), 0.52 * np.sin(angle),
+            rng.uniform(-1.0, 1.0, 150),
+        ])
+        directions = rng.standard_normal((12, 3))
+        self.directions = directions / np.linalg.norm(directions, axis=1)[:, None]
+
+    def test_batched_visible_matches_per_ray_walk(self):
+        for index, direction in enumerate(self.directions):
+            with self.subTest(direction=index):
+                batched = self.occluder.visible(self.points, direction)
+                reference = np.array([
+                    not self.occluder._ray_hits_mesh(
+                        point, direction, self.occluder.bias
+                    )
+                    for point in self.points
+                ])
+                np.testing.assert_array_equal(batched, reference)
+
+    def test_axis_aligned_and_degenerate_directions_agree(self):
+        # Zero components exercise the slab test's parallel-axis branch.
+        for direction in (np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]),
+                          np.array([0.0, 1.0, 0.0])):
+            with self.subTest(direction=tuple(direction)):
+                batched = self.occluder.visible(self.points, direction)
+                reference = np.array([
+                    not self.occluder._ray_hits_mesh(
+                        point, direction, self.occluder.bias
+                    )
+                    for point in self.points
+                ])
+                np.testing.assert_array_equal(batched, reference)
+
+    def test_packed_many_matches_direct_calls(self):
+        packed = self.occluder.visible_many_packed(self.points, self.directions)
+        for index, direction in enumerate(self.directions):
+            np.testing.assert_array_equal(
+                packed.column(index), self.occluder.visible(self.points, direction)
+            )
+
+    def test_cross_rows_matches_numpy_cross(self):
+        rng = np.random.default_rng(5)
+        left, right = rng.standard_normal((64, 3)), rng.standard_normal((64, 3))
+        np.testing.assert_array_equal(
+            Occluder._cross_rows(left, right), np.cross(left, right)
+        )
+        np.testing.assert_array_equal(
+            Occluder._cross_rows(left[0][None, :], right), np.cross(left[0][None, :], right)
+        )
+        stack = rng.standard_normal((7, 64, 3))
+        np.testing.assert_array_equal(
+            Occluder._cross_rows(stack, right[None, :, :]),
+            np.cross(stack, right[None, :, :]),
+        )
+
+    def test_leaf_ray_chunking_does_not_change_the_answer(self):
+        full = self.occluder.visible(self.points, self.directions[0])
+        original = Occluder._LEAF_RAY_CHUNK
+        try:
+            Occluder._LEAF_RAY_CHUNK = 7
+            chunked = self.occluder.visible(self.points, self.directions[0])
+        finally:
+            Occluder._LEAF_RAY_CHUNK = original
+        np.testing.assert_array_equal(full, chunked)
+
+    def test_execution_snapshot_carries_the_slab_table(self):
+        snapshot = self.occluder.execution_snapshot()
+        np.testing.assert_array_equal(
+            snapshot.visible(self.points, self.directions[0]),
+            self.occluder.visible(self.points, self.directions[0]),
+        )
+
 if __name__ == "__main__":
     unittest.main()

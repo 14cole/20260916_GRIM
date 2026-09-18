@@ -88,13 +88,26 @@ class SeamCoefficients:
                 f"outside characterized support [{lo:g}, {hi:g}] deg."
             )
         q = np.clip(q, lo, hi)
-        out = []
-        for src in (self.dA_tm, self.dA_te):
-            out.append(
-                np.interp(q, self.phi_deg, src.real)
-                + 1j * np.interp(q, self.phi_deg, src.imag)
-            )
-        return out[0], out[1]
+        # One bracket search shared by all four real interpolations; np.interp
+        # would repeat it per call, and this is the hottest call in a line
+        # expansion.
+        phi = self.phi_deg
+        upper = np.clip(np.searchsorted(phi, q, side="right"), 1, len(phi) - 1)
+        lower = upper - 1
+        span = phi[upper] - phi[lower]
+        weight = np.where(span > 0.0, (q - phi[lower]) / np.where(span > 0.0, span, 1.0), 0.0)
+        # np.interp returns the tabulated value verbatim on a node; reproduce
+        # that so an on-node query is bit-for-bit the stored coefficient.
+        on_node = q == phi[upper]
+
+        def _blend(src):
+            base = src[lower]
+            return np.where(on_node, src[upper], base + weight * (src[upper] - base))
+
+        return (
+            _blend(self.dA_tm.real) + 1j * _blend(self.dA_tm.imag),
+            _blend(self.dA_te.real) + 1j * _blend(self.dA_te.imag),
+        )
 
 
 def coefficients_from_2d(snapshot: 'Dict',

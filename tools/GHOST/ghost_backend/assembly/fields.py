@@ -2743,10 +2743,12 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
             )
 
 
+            # Bound the cache by memory only.  A fixed four-entry cap evicted
+            # every repeat for a fastener family on a curved skin, where each
+            # placement carries its own normal but orientations still recur.
             entry_bytes = len(dirs) * 48
             while _oriented_pattern_cache and (
-                len(_oriented_pattern_cache) >= 4
-                or (len(_oriented_pattern_cache)+1)*entry_bytes > 32*1024**2
+                (len(_oriented_pattern_cache)+1)*entry_bytes > 32*1024**2
             ):
                 _oriented_pattern_cache.pop(next(iter(_oriented_pattern_cache)))
             _oriented_pattern_cache[oriented_key] = origin_field
@@ -2918,16 +2920,19 @@ def _bor_amp_interp(bor_result: 'Dict[str, Any]', key: 'str',
         raise ValueError("BoR aspect queries must be finite.")
     q_shape = q_raw.shape
     q = np.atleast_1d(q_raw).ravel()
-    out = np.empty(q.shape, dtype=complex)
-    missing = []
-    for i, qi in enumerate(q):
-        hit = np.nonzero(np.isclose(th, qi, rtol=0.0, atol=1e-9))[0]
-        if not hit.size:
-            missing.append(float(qi))
-            continue
-        out[i] = a[int(hit[0])]
-    if missing:
-        unique_missing = np.unique(np.round(missing, 12))
+    # th is sorted and strictly increasing above, so the nearest stored node is
+    # one of the two searchsorted neighbours; the scan this replaces cost one
+    # full pass over the aspect axis for every requested look.
+    upper = np.searchsorted(th, q)
+    right = np.clip(upper, 0, len(th) - 1)
+    left = np.clip(upper - 1, 0, len(th) - 1)
+    nearest = np.where(
+        np.abs(th[right] - q) <= np.abs(th[left] - q), right, left
+    )
+    matched = np.isclose(th[nearest], q, rtol=0.0, atol=1e-9)
+    out = np.where(matched, a[nearest], 0.0).astype(complex)
+    if not np.all(matched):
+        unique_missing = np.unique(np.round(q[~matched], 12))
         raise ValueError(
             "BoR body has no explicitly solved aspect for "
             f"{len(unique_missing)} requested look(s); first missing "
@@ -3623,6 +3628,24 @@ def export_signature_grim(out_path: 'str', *,
         line_visibility = _precompute_line_shadow_visibility(
             line_shadow_inputs, dirs, occluder
         )
+    # Body shadowing is geometry, not frequency: trace it once for the whole
+    # sweep, as export_radar_grim does, instead of once per frequency.
+    point_visibility = None
+    if occluder is not None and points:
+        point_locations = np.asarray(
+            [point.get("shadow_location", point["location"])
+             for point in points], dtype=float
+        ).reshape(len(points), 3)
+        point_normals = np.asarray(
+            [point["aperture_normal"] for point in points], dtype=float
+        ).reshape(len(points), 3)
+        if callable(getattr(occluder, "visible_many_packed", None)):
+            point_visibility = occluder.visible_many_packed(
+                point_locations, dirs, facing_normals=point_normals
+            )
+        else:
+            point_visibility = occluder.visible_many(point_locations, dirs).T
+    line_frame_cache = {}
     for fi, f in enumerate(freqs):
         frequency_placements = _prepared_line_placements_at_frequency(
             placements, float(f), line_payload_cache
@@ -3633,7 +3656,9 @@ def export_signature_grim(out_path: 'str', *,
                            psi_tm_deg=psi_tm_deg, psi_te_deg=psi_te_deg,
                            corners=corners, points=points, occluder=occluder,
                            retain_feature_amplitudes=False,
-                           _line_visibility_matrices=line_visibility)
+                           _point_visibility_matrix=point_visibility,
+                           _line_visibility_matrices=line_visibility,
+                           _line_frame_cache=line_frame_cache)
         for c in chans:
             a = np.asarray(res[f"amp_{c}"]).reshape(n_a, n_r).T
             s = np.asarray(res[f"sigma_{c}"]).reshape(n_a, n_r).T
