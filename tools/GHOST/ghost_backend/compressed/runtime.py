@@ -20,13 +20,22 @@ def automatic_storage():
     return environment_value('GHOST_COMPRESSED_STORAGE_MIB','2048').strip()=='0'
 
 
+def automatic_storage_bytes():
+    """Bytes the automatic setting grants, independent of any environment variable.
+
+    BOR carries its own execution options rather than the 2-D profile, so it
+    needs the sizing rule without the GHOST_COMPRESSED_STORAGE_MIB lookup.
+    """
+    from ghost_backend.twod.solver import _solve_memory_limit_gb
+    return max(AUTOMATIC_STORAGE_FLOOR,int(AUTOMATIC_STORAGE_FRACTION*_solve_memory_limit_gb()*1024**3))
+
+
 def storage_budget():
     text=environment_value('GHOST_COMPRESSED_STORAGE_MIB','2048').strip()
     try:value=int(text)
     except ValueError:raise ValueError('GHOST_COMPRESSED_STORAGE_MIB must be a positive integer, or 0 for automatic.')
     if value==0:
-        from ghost_backend.twod.solver import _solve_memory_limit_gb
-        return max(AUTOMATIC_STORAGE_FLOOR,int(AUTOMATIC_STORAGE_FRACTION*_solve_memory_limit_gb()*1024**3))
+        return automatic_storage_bytes()
     if value<16:raise ValueError('GHOST_COMPRESSED_STORAGE_MIB must be at least 16 MiB.')
     return value*1024**2
 

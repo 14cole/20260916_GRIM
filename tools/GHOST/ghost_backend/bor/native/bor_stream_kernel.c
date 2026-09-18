@@ -61,11 +61,11 @@ void sample_g(int nr, int np_, int nxi,
 }
 
 /* shared bracket-point core: computes p(R) (complex) and R components */
-static inline void pR(double Rx, double Ry, double Rz, double k,
-                      double *R_out, double *p_re, double *p_im)
+static inline void pR_floor(double Rx, double Ry, double Rz, double k, double floor_R,
+                            double *R_out, double *p_re, double *p_im)
 {
     double R = sqrt(Rx * Rx + Ry * Ry + Rz * Rz);
-    if (R < R_MIN) R = R_MIN;
+    if (R < floor_R) R = floor_R;
     double pre = 1.0 / (4.0 * M_PI * R * R * R);
     double kr = k * R;
     double c = cos(kr), s = sin(kr);
@@ -73,6 +73,12 @@ static inline void pR(double Rx, double Ry, double Rz, double k,
     *p_re = pre * (c + kr * s);
     *p_im = pre * (kr * c - s);
     *R_out = R;
+}
+
+static inline void pR(double Rx, double Ry, double Rz, double k,
+                      double *R_out, double *p_re, double *p_im)
+{
+    pR_floor(Rx, Ry, Rz, k, R_MIN, R_out, p_re, p_im);
 }
 
 void sample_mfie(int nr, int np_, int nxi,
@@ -160,6 +166,73 @@ void sample_ibc(int nr, int np_, int nxi,
                 f = Wf_nq * R_fq - Wf_fq * R_nq;
                 ff[2 * l] = f * p_re; ff[2 * l + 1] = f * p_im;
             }
+        }
+    }
+}
+
+/*
+ * Paired near-field bracket sampler.
+ *
+ * sample_mfie walks an nr x np_ outer product against one shared xi grid,
+ * which is the streamed far-block layout.  The near rule instead holds a flat
+ * list of point PAIRS, and its sinh-graded quadrature gives every pair its own
+ * xi row.  Same bracket algebra either way, so this entry takes the paired
+ * layout and a grid that is shared (xi_per_pair = 0) or per pair
+ * (xi_per_pair = 1), covering _mfie_brackets and the near rule's
+ * brackets_grid.  Output arrays are interleaved complex doubles [npair, nxi].
+ *
+ * NEAR_R_MIN mirrors the 1e-300 clamp both NumPy callers apply, not the
+ * 1e-30 the streamed path uses.
+ */
+#define NEAR_R_MIN 1e-300
+
+void near_mfie(int npair, int nxi,
+               const double *GHOST_RESTRICT rho_p,
+               const double *GHOST_RESTRICT z_p,
+               const double *GHOST_RESTRICT tr_p,
+               const double *GHOST_RESTRICT tz_p,
+               const double *GHOST_RESTRICT rho_q,
+               const double *GHOST_RESTRICT z_q,
+               const double *GHOST_RESTRICT tr_q,
+               const double *GHOST_RESTRICT tz_q,
+               double k, const double *GHOST_RESTRICT xi, int xi_per_pair,
+               double *GHOST_RESTRICT o_tt, double *GHOST_RESTRICT o_tf,
+               double *GHOST_RESTRICT o_ft, double *GHOST_RESTRICT o_ff)
+{
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < npair; i++) {
+        const double *xi_row = xi + (xi_per_pair ? (size_t)i * nxi : (size_t)0);
+        double Rz = z_p[i] - z_q[i];
+        double trp = tr_p[i], tzp = tz_p[i], trq = tr_q[i], tzq = tz_q[i];
+        double n_tq_c = tzp * trq, n_tq_k = trp * tzq;
+        double Wt_tq_c = trp * trq, Wt_tq_k = tzp * tzq;
+        size_t base = 2 * (size_t)nxi * (size_t)i;
+        double *tt = o_tt + base, *tf = o_tf + base;
+        double *ft = o_ft + base, *ff = o_ff + base;
+        for (int l = 0; l < nxi; l++) {
+            double cx = cos(xi_row[l]), sx = sin(xi_row[l]);
+            double Rx = rho_p[i] - rho_q[i] * cx;
+            double Ry = rho_q[i] * sx;
+            double R, p_re, p_im;
+            pR_floor(Rx, Ry, Rz, k, NEAR_R_MIN, &R, &p_re, &p_im);
+            double WtR = trp * Rx + tzp * Rz;
+            double WfR = Ry;
+            double nR = -tzp * Rx + trp * Rz;
+            double n_tq = -n_tq_c * cx + n_tq_k;
+            double n_fq = -tzp * sx;
+            double Wt_tq = Wt_tq_c * cx + Wt_tq_k;
+            double Wt_fq = trp * sx;
+            double Wf_tq = -trq * sx;
+            double Wf_fq = cx;
+            double f;
+            f = -(WtR * n_tq - Wt_tq * nR);
+            tt[2 * l] = f * p_re; tt[2 * l + 1] = f * p_im;
+            f = -(WtR * n_fq - Wt_fq * nR);
+            tf[2 * l] = f * p_re; tf[2 * l + 1] = f * p_im;
+            f = -(WfR * n_tq - Wf_tq * nR);
+            ft[2 * l] = f * p_re; ft[2 * l + 1] = f * p_im;
+            f = -(WfR * n_fq - Wf_fq * nR);
+            ff[2 * l] = f * p_re; ff[2 * l + 1] = f * p_im;
         }
     }
 }

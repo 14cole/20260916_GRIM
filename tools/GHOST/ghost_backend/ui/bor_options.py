@@ -8,6 +8,7 @@ class BorOptionsWidget(QGroupBox):
         super().__init__('BOR execution and resources', parent)
         form=QFormLayout(self)
         self.factorization=QComboBox()
+        self.factorization.addItem('Automatic', 'auto')
         self.factorization.addItem('Dense LU', 'dense')
         self.factorization.addItem('Compressed assembly (experimental)', 'compressed')
         form.addRow('Factorization',self.factorization)
@@ -20,10 +21,11 @@ class BorOptionsWidget(QGroupBox):
             self.reuse.addItem(label,value)
         form.addRow('Incident basis reuse',self.reuse)
         self.storage=QSpinBox()
-        self.storage.setRange(16,1048576)
-        self.storage.setValue(2048)
+        self.storage.setRange(0,1048576)
+        self.storage.setValue(0)
         self.storage.setSuffix(' MiB')
-        self.storage.setToolTip('Combined numeric operator and inverse storage across active modes. Workspaces and near quadrature require additional RAM.')
+        self.storage.setSpecialValueText('Automatic')
+        self.storage.setToolTip('Combined numeric operator and inverse storage across active modes, shared by the concurrently factored modes. Automatic sizes it from the solve memory limit. Workspaces and near quadrature require additional RAM.')
         form.addRow('Compressed storage cap',self.storage)
         self.tile=QSpinBox()
         self.tile.setRange(8,128)
@@ -41,7 +43,8 @@ class BorOptionsWidget(QGroupBox):
         self.factorization.currentIndexChanged.connect(self._sync)
 
     def _sync(self):
-        compressed=self.factorization.currentData()=='compressed'
+        # Automatic may still resolve to the compressed path, so its controls stay live.
+        compressed=self.factorization.currentData() in ('compressed','auto')
         self.storage.setEnabled(compressed)
         self.tile.setEnabled(compressed)
         self.cache.setEnabled(compressed)

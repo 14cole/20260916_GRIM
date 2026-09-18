@@ -111,11 +111,30 @@ class BorExecutionTests(unittest.TestCase):
             compressed_factor(oracle,0,False,options,1,cancel)
 
     def test_invalid_options_and_precision_reject_before_assembly(self):
-        for invalid in ({'angle_batch_size':True},{'factorization':'auto'},{'compression_tile':0},{'unknown':1}):
+        for invalid in ({'angle_batch_size':True},{'factorization':'hierarchical'},
+                        {'compression_tile':0},{'compressed_storage_mib':8},{'unknown':1}):
             with self.assertRaises(ValueError):validate_options(invalid)
         with self.assertRaisesRegex(ValueError,'double precision'):
             bor.solve_bor(None,1e9,[0],table_precision='single',bor_options={'factorization':'compressed'})
-        self.assertEqual(current_options()['factorization'],'dense')
+        self.assertEqual(current_options()['factorization'],'auto')
+
+    def test_automatic_backend_and_storage_are_the_defaults(self):
+        value=validate_options({})
+        self.assertEqual(value['factorization'],'auto')
+        self.assertEqual(value['compressed_storage_mib'],0)
+        # 0 is the automatic sentinel; an explicit cap is still honoured.
+        self.assertEqual(validate_options({'compressed_storage_mib':4096})['compressed_storage_mib'],4096)
+
+    def test_automatic_storage_exceeds_the_old_fixed_cap(self):
+        from ghost_backend.compressed.runtime import automatic_storage_bytes,AUTOMATIC_STORAGE_FLOOR
+        self.assertGreaterEqual(automatic_storage_bytes(),AUTOMATIC_STORAGE_FLOOR)
+
+    def test_automatic_factorization_falls_back_without_a_geometry(self):
+        from ghost_backend.bor.dispatch import resolve_automatic_factorization
+        self.assertEqual(resolve_automatic_factorization({}),'dense')
+        self.assertEqual(resolve_automatic_factorization(
+            {'geometry_snapshot':object(),'frequencies_ghz':[1.0],'elevations_deg':[0.0],
+             'table_precision':'single'}),'dense')
 
     def test_cancel_between_batches(self):
         cancelled=[False]

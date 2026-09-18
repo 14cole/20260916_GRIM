@@ -93,7 +93,12 @@ def compressed_factor(oracle, mode, monitor_cond, options, workers, checkpoint=N
     from ghost_backend.compressed.operator import StreamedOperator
     from ghost_backend.compressed.factor import CompressedFactor
     from ghost_backend.bor.solver import BOR_CONDITION_EST_MAX
-    budget = options['compressed_storage_mib'] * 1024**2 // workers
+    from ghost_backend.compressed.runtime import automatic_storage_bytes
+    configured_mib = options['compressed_storage_mib']
+    # 0 sizes the cap from the solve memory limit; a fixed cap starves an
+    # electrically large body, whose modes each need their own share.
+    total = automatic_storage_bytes() if configured_mib == 0 else configured_mib * 1024**2
+    budget = total // workers
     coordinates = oracle.row_coordinates
     if coordinates is None:
         coordinates = np.arange(oracle.n, dtype=float)[:, None]

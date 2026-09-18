@@ -296,12 +296,66 @@ def _modal_kernels_near_rule(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'in
     return out
 
 
+def _native_mfie_brackets(points, k, xi, per_pair: 'bool'):
+    """Four MFIE brackets from the paired native sampler, or None for NumPy.
+
+    The NumPy form materializes about twenty full-size temporaries per call;
+    the native core fuses them into one loop and threads over pairs, which is
+    why this dominates `operators` in a BoR solve.  `points` are 1-D arrays
+    with one entry per point PAIR and `xi` is one shared row (per_pair False)
+    or one row per pair (per_pair True).  Real wavenumbers only, matching the
+    streamed far sampler; anything else falls back.
+    """
+
+    import ctypes
+    from ghost_backend.bor.streaming import _NATIVE
+
+    if _NATIVE is None or not hasattr(_NATIVE, 'near_mfie'):
+        return None
+    wavenumber = complex(k)
+    if wavenumber.imag != 0.0:
+        return None
+    arrays = [np.ascontiguousarray(value, dtype=float) for value in points]
+    if any(value.ndim != 1 for value in arrays):
+        return None
+    n_pairs = arrays[0].size
+    if n_pairs == 0 or any(value.size != n_pairs for value in arrays):
+        return None
+    grid = np.ascontiguousarray(xi, dtype=float)
+    if per_pair:
+        if grid.ndim != 2 or grid.shape[0] != n_pairs:
+            return None
+        n_xi = int(grid.shape[1])
+    else:
+        if grid.ndim != 1:
+            return None
+        n_xi = int(grid.size)
+    if n_xi == 0:
+        return None
+    pointer = ctypes.POINTER(ctypes.c_double)
+    out = [np.empty((n_pairs, n_xi), dtype=np.complex128) for _ in range(4)]
+    _NATIVE.near_mfie(
+        ctypes.c_int(n_pairs), ctypes.c_int(n_xi),
+        *[value.ctypes.data_as(pointer) for value in arrays],
+        ctypes.c_double(wavenumber.real), grid.ctypes.data_as(pointer),
+        ctypes.c_int(1 if per_pair else 0),
+        *[value.ctypes.data_as(pointer) for value in out],
+    )
+    return tuple(out)
+
+
 def _mfie_brackets(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k, xi):
     """The four MFIE bracket functions at azimuth offsets xi.
 
     Point arrays have shape S; xi has shape X; returns four arrays S+X.
     Test point at phi = 0; source at phi' = -xi.  n_hat = (-tz, 0, tr)
     (outward per the generatrix convention)."""
+
+    native = _native_mfie_brackets(
+        (rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q), k, xi, False
+    )
+    if native is not None:
+        return native
 
     cx, sx = np.cos(xi), np.sin(xi)
     Rx = rho_p[..., None] - rho_q[..., None] * cx
@@ -375,20 +429,41 @@ def _project_pm_brackets(Fp, Fm, w_pos, xi_pos, m) -> 'List[np.ndarray]':
 
     Splitting into real cos/sin einsums costs ~4x fewer flops than the
     complex-exponential form and shares the trig tables across brackets.
-    Returns one [n_pairs, len(m)] array per bracket."""
+    Returns one [n_pairs, len(m)] array per bracket.
 
+    Building the trig tables, not the products, is the bulk of the cost, so
+    they are built for |m| only: cos is even and sin is odd, which halves
+    both the tables and the products for a symmetric -m_max..m_max range.
+    Real and imaginary parts ride as extra GEMM rows so the tables stay
+    float64 instead of being promoted to complex per chunk."""
 
-    S = np.stack(
-        [(Fpos + Fneg) * w_pos for Fpos, Fneg in zip(Fp, Fm)], axis=1
+    sums = [(Fpos + Fneg) * w_pos for Fpos, Fneg in zip(Fp, Fm)]
+    diffs = [(Fpos - Fneg) * w_pos for Fpos, Fneg in zip(Fp, Fm)]
+    count = len(sums)
+    stacked = np.stack(
+        [value.real for value in sums] + [value.imag for value in sums]
+        + [value.real for value in diffs] + [value.imag for value in diffs],
+        axis=1,
     )
-    D = np.stack(
-        [(Fpos - Fneg) * w_pos for Fpos, Fneg in zip(Fp, Fm)], axis=1
-    )
-    projected = np.empty((len(xi_pos), len(Fp), len(m)), complex)
-    for m0 in range(0, len(m), 32):
-        arg = xi_pos[:, :, None] * m[None, None, m0:m0 + 32]
-        projected[:, :, m0:m0 + 32] = np.matmul(S, np.cos(arg)) - 1j * np.matmul(D, np.sin(arg))
-    return [projected[:, i, :] for i in range(projected.shape[1])]
+    del sums, diffs
+
+    m = np.asarray(m)
+    magnitude = np.abs(m)
+    orders = np.arange(int(magnitude.max()) + 1 if m.size else 0)
+    pairs, rows = len(xi_pos), stacked.shape[1]
+    cosines = np.empty((pairs, rows, len(orders)))
+    sines = np.empty((pairs, rows, len(orders)))
+    for m0 in range(0, len(orders), 32):
+        arg = xi_pos[:, :, None] * orders[None, None, m0:m0 + 32]
+        cosines[:, :, m0:m0 + 32] = np.matmul(stacked, np.cos(arg))
+        sines[:, :, m0:m0 + 32] = np.matmul(stacked, np.sin(arg))
+
+    s_cos = cosines[:, 0:count] + 1j * cosines[:, count:2 * count]
+    d_sin = sines[:, 2 * count:3 * count] + 1j * sines[:, 3 * count:4 * count]
+    # sin(m xi) = sign(m) sin(|m| xi); sign(0) and sin(0) agree at zero.
+    signs = np.sign(m).astype(float)
+    projected = s_cos[:, :, magnitude] - 1j * signs[None, None, :] * d_sin[:, :, magnitude]
+    return [projected[:, i, :] for i in range(count)]
 
 
 def _mfie_kernels_near_rule(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
@@ -446,6 +521,12 @@ def _mfie_kernels_near_rule(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
 
 
     def brackets_grid(xi):
+        native = _native_mfie_brackets(
+            (rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q), k, xi, True
+        )
+        if native is not None:
+            return native
+
         cx, sx = np.cos(xi), np.sin(xi)
         Rx = rho_p[:, None] - rho_q[:, None] * cx
         Ry = rho_q[:, None] * sx

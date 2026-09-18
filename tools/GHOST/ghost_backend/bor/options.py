@@ -4,8 +4,12 @@ import inspect
 from ghost_backend.execution.runtime import ScopedValue
 
 
+# factorization='auto' sizes the backend from the memory estimate, as the 2-D
+# entry points do: dense/streaming while it fits, compressed once it does not.
+# compressed_storage_mib=0 sizes the compressed cap the same way, instead of a
+# fixed cap that an electrically large body silently outgrows.
 DEFAULTS = dict(version=1, angle_batch_size=64, rhs_compression='auto',
-                factorization='dense', compressed_storage_mib=2048,
+                factorization='auto', compressed_storage_mib=0,
                 compression_tile=32, tile_cache_mib=16)
 _ACTIVE = ScopedValue('ghost_bor_options', default=None)
 _ABORT = ScopedValue('ghost_bor_abort', default=None)
@@ -17,17 +21,20 @@ def validate_options(value):
     result = dict(DEFAULTS)
     result.update(value)
     for name, lower, upper in (('version', 1, 1), ('angle_batch_size', 1, 256),
-                               ('compressed_storage_mib', 16, 1048576),
                                ('compression_tile', 8, 128)):
         number = result[name]
         if type(number) is not int or not lower <= number <= upper:
             raise ValueError('BOR {} must be an integer in {}..{}.'.format(name, lower, upper))
+    storage = result['compressed_storage_mib']
+    if type(storage) is not int or not (storage == 0 or 16 <= storage <= 1048576):
+        raise ValueError('BOR compressed_storage_mib must be 0 for automatic, '
+                         'or an integer in 16..1048576.')
     if type(result['tile_cache_mib']) is not int or not 0 <= result['tile_cache_mib'] <= 4096:
         raise ValueError('BOR tile_cache_mib must be an integer in 0..4096.')
     if result['rhs_compression'] not in ('off', 'auto', 'on'):
         raise ValueError('BOR rhs_compression must be off, auto, or on.')
-    if result['factorization'] not in ('dense', 'compressed'):
-        raise ValueError('BOR factorization must be dense or compressed.')
+    if result['factorization'] not in ('auto', 'dense', 'compressed'):
+        raise ValueError('BOR factorization must be auto, dense, or compressed.')
     return result
 
 
@@ -56,6 +63,10 @@ def configured(function):
         options = current_options() if supplied is None else validate_options(supplied)
         bound = signature.bind_partial(*args, **kwargs)
         checkpoint = bound.arguments.get('check_abort', current_checkpoint())
+        if options['factorization'] == 'auto':
+            from ghost_backend.bor.dispatch import resolve_automatic_factorization
+            options = dict(options, factorization=resolve_automatic_factorization(
+                bound.arguments, certified='certified' in function.__name__))
         if options['factorization'] == 'compressed':
             precision = str(bound.arguments.get('table_precision', 'auto')).strip().lower()
             if precision not in ('auto', 'double', 'single'):

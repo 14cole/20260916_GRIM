@@ -5,7 +5,7 @@ import cmath
 import math
 import os
 import threading
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 from ghost_backend.execution.metrics import active_metrics, profiled_solve, timed_stage
@@ -396,6 +396,64 @@ def _validate_bor_far_controls(kind: 'str', assembly: 'str',
         "layered_n", "banded",
     }:
         raise ValueError(f"Unsupported BoR assembly-control kind {kind!r}.")
+
+
+def resolve_automatic_factorization(
+    arguments: 'Mapping[str, Any]', certified: 'bool' = False,
+) -> 'str':
+    """Pick the BOR backend from the memory estimate, as the 2-D entries do.
+
+    Dense/streaming assembly is kept while its estimated peak fits the solve
+    memory limit, because it is the validated default.  Once the estimate
+    exceeds that limit -- or the streaming planner rejects the geometry
+    outright, which it does above roughly 10 ft at 18 GHz -- the compressed
+    path is the only one that runs at all, so it is chosen instead.
+
+    The estimate is priced at the highest requested frequency, which is the
+    most expensive one.  Anything that leaves the backend genuinely
+    undetermined keeps 'dense' so the solve itself reports the problem.
+    """
+
+    from ghost_backend.twod.solver import _solve_memory_limit_gb
+
+    supplied = dict(arguments)
+    nested = supplied.pop('kwargs', None)
+    if isinstance(nested, dict):
+        supplied.update(nested)
+    snapshot = supplied.get('geometry_snapshot')
+    frequencies = supplied.get('frequencies_ghz')
+    aspects = supplied.get('elevations_deg')
+    if snapshot is None or not frequencies or aspects is None or not len(aspects):
+        return 'dense'
+    if str(supplied.get('table_precision', 'auto')).strip().lower() == 'single':
+        # Compressed assembly requires double precision; never pick it here.
+        return 'dense'
+    try:
+        peak = estimate_bor_resources(
+            snapshot,
+            max(float(value) for value in frequencies),
+            aspects,
+            geometry_units=supplied.get('geometry_units', 'inches'),
+            material_base_dir=supplied.get('material_base_dir'),
+            n_modes=supplied.get('n_modes'),
+            max_elements=supplied.get('max_elements', MAX_ELEMENTS_DEFAULT),
+            workers=max(1, int(supplied.get('workers') or 1)),
+            table_precision=supplied.get('table_precision', 'auto'),
+            assembly=supplied.get('assembly', 'auto'),
+            stream_budget_gb=supplied.get(
+                'stream_budget_gb', BOR_STREAM_BUDGET_GB_DEFAULT
+            ),
+            mesh_certification=bool(certified),
+            bor_options=dict(factorization='dense'),
+        )['estimated_peak_gb']
+    except (ValueError, MemoryError, ArithmeticError):
+        # Includes the streaming planner's one-mode retained-block rejection.
+        return 'compressed'
+    except Exception:
+        return 'dense'
+    if not math.isfinite(peak):
+        return 'dense'
+    return 'compressed' if peak > _solve_memory_limit_gb() else 'dense'
 
 
 @configured

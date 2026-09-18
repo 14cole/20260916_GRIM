@@ -87,6 +87,12 @@ def _load_native():
             lib.sample_mfie.restype = None
             lib.sample_ibc.argtypes = bracket_args
             lib.sample_ibc.restype = None
+            if hasattr(lib, "near_mfie"):
+                # Paired near sampler; absent from kernels built before it existed.
+                lib.near_mfie.argtypes = (
+                    [ci, ci] + [dp] * 8 + [cd, dp, ci] + [dp] * 4
+                )
+                lib.near_mfie.restype = None
             return lib
     return None
 

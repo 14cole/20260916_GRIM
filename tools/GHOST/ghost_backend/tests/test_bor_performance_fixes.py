@@ -202,3 +202,144 @@ class MultiRegionConstraintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _numpy_brackets():
+    """Force the NumPy bracket path regardless of the native kernel."""
+    return mock.patch.object(kernels, "_native_mfie_brackets", lambda *a, **k: None)
+
+
+def _pair_points(count, seed=17):
+    rng = np.random.default_rng(seed)
+    rho_p = rng.uniform(0.5, 1.0, count)
+    z_p = rng.uniform(-1.0, 1.0, count)
+    return (rho_p, z_p, rng.uniform(-1.0, 1.0, count), rng.uniform(-1.0, 1.0, count),
+            rho_p + rng.uniform(-0.02, 0.02, count), z_p + rng.uniform(-0.02, 0.02, count),
+            rng.uniform(-1.0, 1.0, count), rng.uniform(-1.0, 1.0, count))
+
+
+def _native_kernel():
+    from ghost_backend.bor.streaming import _NATIVE
+    return _NATIVE if (_NATIVE is not None and hasattr(_NATIVE, "near_mfie")) else None
+
+
+class NativeNearBracketTests(unittest.TestCase):
+    """The paired native sampler must mirror the NumPy brackets it replaces."""
+
+    K = 83.8
+
+    def setUp(self):
+        # Without the kernel both branches are NumPy and the comparisons are vacuous.
+        if _native_kernel() is None:
+            self.skipTest("native BoR kernel with near_mfie is not built here")
+        engaged = kernels._native_mfie_brackets(
+            _pair_points(4), self.K, np.linspace(-np.pi, np.pi, 8), False
+        )
+        self.assertIsNotNone(engaged, "native sampler declined a paired call")
+
+    def test_shared_grid_brackets_match_numpy(self):
+        points = _pair_points(64)
+        xi = 2.0 * np.pi * np.arange(128) / 128.0 - np.pi
+        native = kernels._mfie_brackets(*points, self.K, xi)
+        with _numpy_brackets():
+            reference = kernels._mfie_brackets(*points, self.K, xi)
+        for got, want in zip(native, reference):
+            np.testing.assert_allclose(got, want, rtol=1e-12, atol=0.0)
+
+    def test_per_pair_grid_near_rule_matches_numpy(self):
+        points = _pair_points(48, seed=23)
+        native = kernels._mfie_kernels_near_rule(*points, self.K, 6)
+        with _numpy_brackets():
+            reference = kernels._mfie_kernels_near_rule(*points, self.K, 6)
+        for got, want in zip(native, reference):
+            np.testing.assert_allclose(got, want, rtol=1e-11, atol=0.0)
+
+    def test_complex_wavenumber_uses_the_numpy_path(self):
+        points = _pair_points(8)
+        xi = np.linspace(-np.pi, np.pi, 32)
+        self.assertIsNone(
+            kernels._native_mfie_brackets(points, 83.8 - 4.0j, xi, False)
+        )
+
+    def test_non_paired_shapes_decline_the_native_path(self):
+        rho_p = np.linspace(0.5, 1.0, 8)
+        outer = (rho_p[:, None], rho_p[:, None], rho_p[:, None], rho_p[:, None],
+                 rho_p[None, :], rho_p[None, :], rho_p[None, :], rho_p[None, :])
+        self.assertIsNone(
+            kernels._native_mfie_brackets(outer, 83.8, np.linspace(0.0, 1.0, 4), False)
+        )
+        mismatched = tuple([rho_p] * 7 + [rho_p[:4]])
+        self.assertIsNone(
+            kernels._native_mfie_brackets(mismatched, 83.8, np.linspace(0.0, 1.0, 4), False)
+        )
+
+
+class ModalProjectionTests(unittest.TestCase):
+    """Half-range +-xi projection, built for |m| and mirrored by parity."""
+
+    @staticmethod
+    def _signed_reference(Fp, Fm, w_pos, xi_pos, m):
+        """The direct signed-m form the |m| construction replaces."""
+        S = np.stack([(a + b) * w_pos for a, b in zip(Fp, Fm)], axis=1)
+        D = np.stack([(a - b) * w_pos for a, b in zip(Fp, Fm)], axis=1)
+        out = np.empty((len(xi_pos), len(Fp), len(m)), complex)
+        for m0 in range(0, len(m), 32):
+            arg = xi_pos[:, :, None] * m[None, None, m0:m0 + 32]
+            out[:, :, m0:m0 + 32] = (
+                np.matmul(S, np.cos(arg)) - 1j * np.matmul(D, np.sin(arg))
+            )
+        return [out[:, i, :] for i in range(out.shape[1])]
+
+    def test_matches_the_signed_form_across_mode_ranges(self):
+        rng = np.random.default_rng(5)
+        for pairs, samples, m_max in ((40, 60, 3), (25, 48, 10), (12, 32, 17)):
+            with self.subTest(pairs=pairs, m_max=m_max):
+                Fp = [rng.standard_normal((pairs, samples))
+                      + 1j * rng.standard_normal((pairs, samples)) for _ in range(4)]
+                Fm = [rng.standard_normal((pairs, samples))
+                      + 1j * rng.standard_normal((pairs, samples)) for _ in range(4)]
+                weights = rng.standard_normal((pairs, samples))
+                xi = rng.standard_normal((pairs, samples))
+                modes = np.arange(-m_max, m_max + 1)
+                got = kernels._project_pm_brackets(Fp, Fm, weights, xi, modes)
+                want = self._signed_reference(Fp, Fm, weights, xi, modes)
+                self.assertEqual(len(got), len(want))
+                for a, b in zip(got, want):
+                    np.testing.assert_allclose(a, b, rtol=1e-11, atol=0.0)
+
+    def test_symmetric_samples_make_the_mode_range_even(self):
+        """Fp == Fm kills the sine term, so +m and -m must coincide exactly."""
+        rng = np.random.default_rng(9)
+        shared = [rng.standard_normal((6, 16)) + 1j * rng.standard_normal((6, 16))
+                  for _ in range(4)]
+        weights = rng.standard_normal((6, 16))
+        xi = rng.standard_normal((6, 16))
+        m_max = 3
+        projected = kernels._project_pm_brackets(
+            shared, list(shared), weights, xi, np.arange(-m_max, m_max + 1)
+        )
+        for bracket in projected:
+            for order in range(1, m_max + 1):
+                np.testing.assert_allclose(
+                    bracket[:, m_max + order], bracket[:, m_max - order],
+                    rtol=1e-12, atol=0.0,
+                )
+
+    def test_antisymmetric_samples_make_the_mode_range_odd(self):
+        """Fm == -Fp kills the cosine term, so +m and -m must be negatives."""
+        rng = np.random.default_rng(11)
+        shared = [rng.standard_normal((5, 12)) + 1j * rng.standard_normal((5, 12))
+                  for _ in range(4)]
+        weights = rng.standard_normal((5, 12))
+        xi = rng.standard_normal((5, 12))
+        m_max = 3
+        projected = kernels._project_pm_brackets(
+            shared, [-value for value in shared], weights, xi,
+            np.arange(-m_max, m_max + 1),
+        )
+        for bracket in projected:
+            for order in range(1, m_max + 1):
+                np.testing.assert_allclose(
+                    bracket[:, m_max + order], -bracket[:, m_max - order],
+                    rtol=1e-12, atol=0.0,
+                )
